@@ -155,6 +155,49 @@ class EdgeExecutionFailed(NavigationError):
 class PluginError(BotError):
     """Anything that goes wrong inside `core.scheduler` or a `GameplayPlugin`.
 
-    Reserved for Phase 3. Subclasses will cover "plugin import failed",
-    "plugin worker raised", "command queue closed", etc.
+    Concrete subclasses below cover the predictable failure modes; ad-hoc
+    runtime explosions (`KeyError`, `AttributeError`, etc.) raised inside a
+    plugin's `run()` are NOT translated — `PluginWorker` captures them
+    verbatim in `last_error` so callers can debug.
+    """
+
+
+class PluginDiscoveryFailed(PluginError):
+    """A directory under `plugins/` could not be imported into a plugin class.
+
+    Raised by `PluginRegistry.discover` when a plugin module's import errors
+    out, or when its declared class is missing required attributes. Carried
+    in `PluginRegistry.failed`, never thrown out — the scheduler keeps going.
+    """
+
+
+class PluginNotRegistered(PluginError):
+    """Asked the registry or scheduler for a plugin name that isn't known.
+
+    Typically a typo in config (`enabled_plugins`) or a stale reference after
+    a plugin was renamed.
+    """
+
+
+class AccountNotRegistered(PluginError):
+    """`Scheduler.start_plugin(...)` called for an account that has no runtime.
+
+    The caller must run `Scheduler.register_account(...)` first.
+    """
+
+
+class PluginRequirementUnmet(PluginError):
+    """A plugin's `requires_vertices` includes ids missing from the assembled graph.
+
+    Raised before the worker starts so we never enter `run()` against an
+    incomplete graph. Usually means another plugin the dependency relies on
+    is not enabled, or main graph forgot a vertex.
+    """
+
+
+class WorkerAlreadyRunning(PluginError):
+    """Tried to start a `(account_id, plugin)` whose worker is still alive.
+
+    Defensive guard — duplicated `start_plugin` calls are almost always a
+    bug in the caller. Stop first, then start.
     """

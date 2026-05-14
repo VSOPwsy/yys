@@ -9,7 +9,7 @@
 - ✅ Phase 0：项目骨架 + IPC 冒烟测试
 - ✅ Phase 1：核心抽象层（异常体系 / 日志 / TTL 缓存 / Button / TemplateRepository / TemplateMatcher / OCR / InputBackend 抽象 + NemuIpcBackend / 工厂 / dev_tools 模板提取与匹配调试 / 52 项单元测试）
 - ✅ Phase 2：图导航系统（GameGraph + DSL（subgraph/root_graph/vertex/edge/external + 9 个 action 工厂） / GraphAssembler 含未启用插件 dangling 处理 / PathFinder 含 avoid_risky / avoid_tags / 随机路径 / ScreenRecognizer / Navigator goto + 失败重规划 / dev_tools 三件套（visualizer/screen_inspector/composer） / 52 项新单元测试，全包 104 项通过）
-- ⬜ Phase 3：Plugin 与线程（Worker 池、命令队列、停止 Event、热加载）
+- ✅ Phase 3：插件 + 线程 + 全局热键（CacheManager 字节预算 / GameplayPlugin + PluginContext（含可中断 sleep / wait_until_resumed） / PluginRegistry 扫盘发现 / PluginWorker 状态机 IDLE→RUNNING→{PAUSED,STOPPED,ERROR} / Scheduler 多账号多插件 + 命令队列 + 调度器线程 / HotkeyController 含 noop 后端 + F9/F10/F12 默认 / FakeBackend 提取到 core / DemoPlugin 5 次循环 + 跨命名空间返回 / 71 项新单元测试，全包 175 项通过）
 - ⬜ Phase 4：首个玩法（一个完整的可跑业务循环）
 
 ## 3. 强制开发纪律（每次工作必读）
@@ -27,14 +27,14 @@
 ```text
 project/
 ├── core/                          # 生产代码核心层。所有抽象基类、运行时框架都在这。
-│   ├── exceptions.py              # 异常树根 BotError 及全部子类（Phase 1）。
+│   ├── exceptions.py              # 异常树根 BotError 及全部子类（Phase 1/2/3 持续扩充）。
 │   ├── logging_config.py          # setup_logging / get_logger，彩色 + 按天滚动（Phase 1）。
-│   ├── input_backend/             # Strategy 模式：抽象输入接口 + 具体实现（nemu_backend.py）+ 工厂。
+│   ├── input_backend/             # Strategy 模式：抽象输入接口 + nemu_backend.py + fake.py（demo/test）+ 工厂。
 │   ├── vision/                    # 视觉栈：Button、TemplateRepository、TemplateMatcher、OcrEngine。
 │   ├── navigation/                # 图导航：vertex/edge 模型、路径搜索、跨命名空间合并。
-│   ├── scheduler/                 # 调度：Plugin 基类、Worker 线程、命令队列。
-│   ├── hotkey/                    # 全局热键（启动/暂停玩法）。
-│   └── cache/                     # 带 TTL 的内存缓存（lru.py: TTLCache）。
+│   ├── scheduler/                 # Phase 3：plugin_base.py / registry.py / worker.py / scheduler.py。
+│   ├── hotkey/                    # Phase 3：controller.py（keyboard / noop 后端）。
+│   └── cache/                     # lru.py: TTLCache（计数）；manager.py: CacheManager（字节预算，per account_id）。
 ├── vendor/alas/                   # Alas (LmeSzinc/AzurLaneAutoScript) 的 verbatim 子集。
 │                                  # 详见 vendor/alas/README.md。
 ├── plugins/                       # 每个子目录 = 一个玩法 = 一个 GameplayPlugin 实现。
@@ -612,6 +612,181 @@ CLI：`python dev_tools/screen_inspector.py --mumu <root> [--instance N] [--disp
 
 `click_at` 输出会在草稿里附 "WARNING: hardcoded coordinates" 注释。`press_back` 在 nemu backend 上会抛 `NotImplementedError`，工具会提示改用 `click_button`。
 
+---
+
+### core/cache/manager.py — Phase 3
+
+#### `CacheManager(account_id: str, *, max_bytes=100MB, default_ttl=300.0, clock=time.monotonic)`
+
+字节预算的 LRU + per-entry TTL 缓存。**按 account_id 一个实例**（CLAUDE.md S5），生命周期跟随 `AccountRuntime`。底层不是 `TTLCache`——它按 *条数* 算，截图会撑爆。`CacheManager` 用近似字节大小算预算。
+
+**构造异常**：`ValueError`（`account_id` 空 / `max_bytes <= 0` / `default_ttl < 0`）。
+
+**属性**：`account_id` / `max_bytes` / `total_bytes`（当前已用字节，近似）。
+
+**核心方法**
+- `get(key, loader=None, *, ttl=None) -> Any | None`：取；命中则 bump 到 MRU；过期则静默 evict。`loader` 是零参 callable，未命中时**在锁外**调用其结果并存进缓存。`loader` 抛错则原样抛，不写缓存。
+- `set(key, value, *, ttl=None) -> None`：插入/覆盖。`ttl=None` 用 `default_ttl`；`ttl<=0` 等价 invalidate。超预算时按 LRU 淘汰；单个 value 超 `max_bytes` 仍然存入但日志告警。
+- `set_screenshot(key, image: np.ndarray, *, ttl=60.0) -> None`：糖方法，对 `image` 必须 `np.ndarray`（不是抛 `ValueError`）。默认 TTL 比常规 `set` 短，因为截图很容易过时。
+- `invalidate(key) -> bool` / `clear() -> None` / `purge_expired() -> int`。
+- `__len__` / `__contains__`（自动剔除已过期）。
+
+**字节估算**：`np.ndarray` 用 `.nbytes`；`bytes`/`bytearray`/`memoryview` 用 `len`；`str` 用 `len(s)*2`；其他用 `sys.getsizeof`。**这是近似值，不是严格上限**——预算只是淘汰触发器。
+
+---
+
+### core/scheduler/plugin_base.py — Phase 3
+
+#### `PluginContext(account_id, backend, navigator, matcher, ocr, cache, logger, extras={}, _stop_event, _pause_event)`（dataclass）
+
+每个 `(account, plugin)` 一份，由 `Scheduler.start_plugin` 构造，作为参数传给 plugin 的所有生命周期方法。**禁止跨方法捕获字段引用做持久状态**（context 在 teardown 后被丢弃，但事件是 worker 拥有的，捕获 `should_stop` 一次是安全的）。
+
+**字段**
+- `account_id` *(str, 必填)*：账号 id。
+- `backend` *(InputBackend)*：本账号专属 backend，已 connect。
+- `navigator` *(Navigator)*：已绑定本账号 backend + 组装好的 graph。
+- `matcher` *(TemplateMatcher)*：本账号 backend 的 matcher（模板共享 OK）。
+- `ocr` *(OcrEngine | None)*：进程级单例（CLAUDE.md S5 例外）。可能为 None。
+- `cache` *(CacheManager)*：本账号专属缓存。
+- `logger` *(logging.Logger)*：名字形如 `plugin.<account>.<plugin>`，方便 grep。
+- `extras` *(dict)*：自由收纳；插件私有状态可塞这里。
+- `_stop_event` / `_pause_event` *(threading.Event)*：worker 拥有，**用 `should_stop()` / `should_pause()` 而非直接读**。
+
+**方法**
+- `should_stop() -> bool`：主循环每次迭代必查。
+- `should_pause() -> bool`：典型用法是配合 `wait_until_resumed()`。
+- `sleep(seconds: float) -> bool` ⭐：可中断 sleep；返回 True iff 期间 stop 被设置（即 `if ctx.sleep(0.5): return` 是早退模板）。`seconds <= 0` 立即返回。底层用 `Event.wait`（monotonic 时基）。
+- `wait_until_resumed(*, poll=0.2) -> bool`：阻塞直到 pause 被清除或 stop 被设置；返回 True iff 是 stop 让我们退出。
+
+#### `GameplayPlugin`（abstract base class）
+
+**ClassVars（子类必填）**
+- `name: str`：唯一标识 + 图命名空间前缀。不能含 `.`。
+- `display_name: str`：日志/UI 显示用；空则 fallback `name`。
+- `requires_vertices: List[str]`：全限定 vertex id 列表。worker 启动前 scheduler 验证；缺一个抛 `PluginRequirementUnmet`，不会进 `setup`。
+
+**抽象方法**
+- `build_subgraph(cls) -> GameGraph`：classmethod。约定：实现里 `from plugins.<name>.graph import build_subgraph; return build_subgraph()`，让 `graph.py` 当真正的源头。
+- `setup(self, ctx)`：一次性 prep，worker 启动后立刻调。抛错则 worker 进 ERROR，**run 跳过，teardown 仍然跑**。
+- `run(self, ctx)`：主循环。**必须** 周期性查 `ctx.should_stop()`；理想再查 `ctx.should_pause()`。正常 return = "活干完了"。抛 `BotError` 子类进 ERROR；抛其他异常也是 ERROR（额外 log full traceback）。
+- `teardown(self, ctx)`：清理。**无论 run 是否抛错都会跑**，且自身的异常只 log 不再传播（除非 run 没抛错，那这次 teardown 异常就是主因）。
+
+**可选钩子**（默认 no-op）
+- `on_pause(self, ctx)`：pause 标志被设置后、plugin 还没察觉前调（在 *调用 pause() 的线程上*）。
+- `on_resume(self, ctx)`：resume 后调。
+
+**构造**：插件必须支持 0 参 `__init__`，配置走 `PluginContext.extras` 或 yaml。`GameplayPlugin.__init__` 会校验 `name` 非空且不含 `.`。
+
+**模块函数 `make_logger(account_id, plugin_name)`**：返回 logger 名 `plugin.<account>.<plugin>`，scheduler 给 ctx 用，外部一般不需要。
+
+---
+
+### core/scheduler/registry.py — Phase 3
+
+#### `PluginRegistry()`
+
+扫盘发现 + 类注册 + 子图收集，**进程级共享 OK 但不强求**（只存类，不存实例）。
+
+- `register(plugin_cls)`：手动注册一个类。空 name / 含 `.` / 与已注册的不同类同名 → 抛 `PluginDiscoveryFailed`。重复注册同一个类幂等。
+- `discover(plugins_package="plugins", *, skip=None) -> list[type[GameplayPlugin]]`：`pkgutil.iter_modules` 走 `plugins/<x>` 子包，跳过 `__pycache__` 和 dotfiles，import 失败/类校验失败都不抛，**累积到 `self.failed`**。
+- `get(name)`：未注册抛 `PluginNotRegistered`。
+- `list() -> List[str]`：已注册的 name 排序。
+- `failed -> List[PluginFailure]`（dataclass: module / reason / error）：所有未恢复的失败。
+- `collect_subgraphs(*, only=None) -> Dict[str, GameGraph]`：调用每个注册插件的 `build_subgraph()`。`only` 限定子集（未知 name 只 warning 跳过）。某个插件 build 抛错 → 不入 result，进 failed。返回非 GameGraph 同样剔除并记 failure。**绝不抛**。
+
+---
+
+### core/scheduler/worker.py — Phase 3
+
+#### `WorkerStatus`（Enum）：`IDLE` / `RUNNING` / `PAUSED` / `STOPPED` / `ERROR`
+
+#### `PluginWorker(plugin, context, *, name=None)`
+
+一个线程包一个插件 + 一个 context。**不可重用**——`stop()` 之后请构造新的 `PluginWorker`。
+
+**属性（线程安全读）**：`plugin` / `context` / `status` / `last_error` / `started_at` / `finished_at` / `is_alive()`。
+
+**方法**
+- `start()`：拉起线程。已 RUNNING/PAUSED 或线程还活着抛 `WorkerAlreadyRunning`。会 reset `last_error` + 两个 Event。
+- `pause()`：set `_pause_event` + 翻 PAUSED 状态。同步在当前线程跑 `on_pause`（异常只 log）。已 PAUSED / 已 STOPPED / 已 ERROR 都 no-op。
+- `resume()`：clear `_pause_event` + 若仍在 PAUSED 则翻回 RUNNING。同步跑 `on_resume`。未在 pause 是 no-op。
+- `stop(timeout=10.0) -> bool` ⭐：set stop + clear pause（让卡在 `wait_until_resumed` 的 plugin 立刻醒来）+ join。返回 True iff 在超时内退出。**没退出也不强杀**（Python 不让），日志告警 + 线程保留 daemonic；status 维持当前值（不撒谎说 STOPPED）。**从 IDLE 调 stop 会翻成 STOPPED，方便 scheduler 直接丢弃。**
+
+**线程体**：`setup → run → teardown`。`setup` / `run` 任一抛错：捕获到 `last_error` + 翻 ERROR + 跳过后续阶段；`teardown` 一定跑。**`BotError` 走简短日志，其他异常额外 `traceback.format_exception` 一份**。退出前总是 clear pause event。
+
+---
+
+### core/scheduler/scheduler.py — Phase 3
+
+#### `AccountRuntime(account_id, backend, graph, navigator, matcher, cache, ocr=None)`（dataclass）
+
+per-account 资源捆绑，**由调用方（如 `main.py`）构造**并传给 `Scheduler.register_account()`。Scheduler 自己不构造它，原因是 backend 的 connect/disconnect 应由调用方控制（emergency stop 时不应该断开 device）。
+
+#### `Scheduler(registry, *, graceful_stop_timeout=10.0)`
+
+多账号多插件 worker 管理器 + 命令队列。**内部数据结构**：`{account_id: {plugin_name: PluginWorker}}` —— 哪怕只有一个账号也走这个形状，将来加账号零代码改动。
+
+**调度器自身生命周期**
+- `start()`：启动命令队列调度器线程（idempotent）。**不会自动启动 worker**——只是开始消费 `submit()` 来的 callable。
+- `shutdown(*, stop_timeout=None)`：`stop_all()` + 关闭 dispatcher。
+
+**账号注册**
+- `register_account(runtime: AccountRuntime)`：重复注册同 id 会先 stop 该账号的所有 worker，再替换 runtime。
+- `unregister_account(account_id)`：stop 该账号所有 worker，丢弃 runtime + worker 表。
+- `registered_accounts() -> List[str]`。
+
+**Worker 控制**（直接调或通过 `submit()`，都线程安全）
+- `start_plugin(plugin_name, account_id) -> PluginWorker` ⭐：构造 `PluginContext` + `PluginWorker` + `start()`。校验顺序：`AccountNotRegistered` → `PluginNotRegistered` → `WorkerAlreadyRunning` → `PluginRequirementUnmet`（基于 `plugin.requires_vertices` vs `runtime.graph.has_vertex(...)`）。
+- `stop_plugin(plugin_name, account_id, *, timeout=None) -> bool`：没运行就返回 True；否则 worker.stop 的结果。
+- `pause_plugin` / `resume_plugin`：no-op 安全。
+- `start_all(account_id=None) -> List[PluginWorker]`：**所有 *注册过的* 插件 × 所有 (或指定) 账号**。已经 alive 的 silently skip；其他异常 log 但不中断批次。
+- `stop_all(account_id=None, *, timeout=None)`：批量 stop。
+- `pause_all` / `resume_all` / `toggle_pause_all`（任一在 PAUSED 则全部 resume，否则把 RUNNING 全 pause —— F9 用这个）。
+
+**状态查询**
+- `list_status() -> Dict[acc, Dict[plugin, WorkerStatus]]`：快照。
+- `get_worker(plugin_name, account_id) -> PluginWorker | None`。
+- `wait_for_idle(timeout=None) -> bool`：轮询 100ms 直到所有 worker 都 `not is_alive()`，或超时。
+
+**命令队列**
+- `submit(callable[[], None])`：把 thunk 排队，dispatcher 线程上跑。非 callable 抛 `ValueError`。**dispatcher 吞掉 callable 抛的异常**（log + 继续），所以一个坏 hotkey 不会卡死队列。
+
+---
+
+### core/hotkey/controller.py — Phase 3
+
+#### `HotkeyAction(hotkey, callback, description="")`（dataclass）
+
+一个绑定的快照。`list()` 返回的就是这玩意儿。
+
+#### `HotkeyController(scheduler, *, backend="keyboard")`
+
+**`backend` 取值**
+- `"keyboard"`（默认）：用 `keyboard` pip 包。Windows 通常需要管理员权限才能稳定 hook。**包加载失败会自动降级到 "noop" 并 log warning**——主流程不会因为热键不可用就崩。
+- `"noop"`：完全不挂 OS hook，只能通过 `trigger()` 程序触发。测试 / 无管理员环境 / CI 都用这个。
+
+**方法**
+- `register(hotkey, callback, *, description="") -> None`：绑一个键。重复 key 替换旧绑定；已 `start()` 后会立刻 re-install 新 binding。空 hotkey / 非 callable 抛 `ValueError`。
+- `register_defaults()`：装上规范的三个键 ——
+  - **F9**：`submit(scheduler.toggle_pause_all)`
+  - **F10**：`submit(scheduler.stop_all)`
+  - **F12**：`emergency_exit`（best-effort `scheduler.stop_all(timeout=2.0)` → `os._exit(2)`，跳过 atexit/finally；用来在某个 worker 在 C 代码里卡死时仍能退出）
+- `list() -> List[HotkeyAction]`：按 hotkey 排序的快照。
+- `start()` / `stop()`：装/卸 OS hooks，idempotent。
+- `trigger(hotkey)`：测试/CLI 用，直接调对应 callback（callback 抛错只 log）。未注册的 hotkey silent。
+
+**线程模型**：`keyboard` 的事件由其内部线程触发；callback 通过 `scheduler.submit` 立刻把执行权扔给 dispatcher 线程，所以 hook 线程从不阻塞，多个键也不会互相 race。
+
+---
+
+### core/input_backend/fake.py — Phase 3（demo / test 用）
+
+#### `FakeBackend(initial_screen="main_menu", *, account_id="fake", matcher=None)`
+
+`InputBackend` 的内存实现。**仅在 demo / 单测中使用**，禁止在真玩法里 import。状态只有一个 `current_screen` 字符串；fake 的 recognizer（`graphs/_demo_actions`）读它，fake 的 action 写它。截图返回特殊 `_ScreenFrame`（4×4 ndarray 上挂 `_demo_screen` 属性），真 backend 的 `Button` recognizer 不会匹配——这是预期。
+
+`click_xy` / `swipe` / `long_click_xy` / `drag` 都是 no-op（duration<=0 仍然抛 `ValueError`）。`connect/disconnect/is_connected` 是 bool 翻转，没有真 IPC。
+
 ## 7. 已知问题与陷阱
 
 - **DLL 截图格式**：返回 BGRA 且上下颠倒。需 `cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)` + `cv2.flip(img, 0, dst=img)`。错过这一步保存的 PNG 颜色异常、上下镜像。
@@ -632,18 +807,40 @@ CLI：`python dev_tools/screen_inspector.py --mumu <root> [--instance N] [--disp
 - **`networkx==3.3` 必须装在 `yys` 环境**：Phase 2 开干前要 `D:\anaconda3\envs\yys\python.exe -m pip install networkx==3.3`。`matplotlib==3.10.9` 也需要装，但只有 `dev_tools/graph_visualizer.py` 用，生产代码绝不 import。
 - **`graph_composer` 必须在真模拟器上跑**：工具会真的对模拟器执行点击/滑动来录制 edge——这是录制 edge 的唯一可靠方式，无法 mock 掉。所有调试输出隔离到 `dev_tools/composer_output/`，不会污染正式 `templates/`。
 
+### 线程安全与生命周期（Phase 3 引入）
+
+- **`Navigator` / `PathFinder` / `ScreenRecognizer` 没有内部锁**：约定每个 `(account_id, plugin)` 由它自己的 `PluginWorker` 单线程使用。**禁止**在两个 plugin 之间共享同一个 `Navigator` 实例（Scheduler 自己按账号建一份 Navigator 供该账号所有 plugin 复用——但 plugin 们各跑自己的线程，所以 Navigator 仍可能被并发调用）⚠️——目前 Scheduler 的设计是同一账号上同时跑多个 plugin 时它们共享同一个 Navigator，这是个**潜在线程安全问题**，Phase 4 第一个真插件上线前要么给 Navigator 加锁，要么强制每账号同时只跑一个 plugin。
+- **`InputBackend` 的高层方法是线程安全的，但语义上是"独占"**：`click(Button)` 的实现是 screenshot+match+click 三步，多个线程并发调它会拿到同一帧但行动顺序未定。同一账号的 plugin 并发跑也面临这个问题——再次提醒"每账号同时一个 plugin"是 Phase 3 的隐式约束。
+- **`TemplateRepository` 跨账号共享是安全的**：模板内容不可变，里头的 LRU 是线程安全的；只在 `dev_tools/template_extractor.py` 写盘后调用 `invalidate(name)` 即可。`CacheManager` 不跨账号，安全。
+- **`OcrEngine` 是进程级单例**：内部 RLock 串行化 `recognize` 调用，多线程调安全但**会排队**。OCR 是慢操作，多账号场景下要么池化、要么接受串行。
+- **`PluginWorker.stop(timeout=10)` 不强杀**：如果 plugin 忽略 `should_stop()`，线程会保留 daemonic 直到进程退出。F12 用 `os._exit(2)` 是为了这种情况下也能退出。**写 plugin 的人对 `should_stop()` 的频次有责任**——纯 CPU 循环里至少每秒查一次，blocking 操作前必查。
+- **`HotkeyController` 在 Windows 上需要管理员**：`keyboard` 包用低层 hook，没管理员时 `import keyboard` 不抛错但 `add_hotkey` 可能失败。控制器会**自动降级 noop 并 log warning**，主进程继续跑——不会因为热键挂了就崩。CI / 服务器跑用 `backend="noop"` 然后通过 `trigger()` 模拟。
+- **`Scheduler.start_all` 默认启动 *所有注册过的* 插件**：不传 `account_id` 时，对每个已注册账号 × 每个已注册插件都尝试 `start_plugin`。已经在跑的 silently skip；其他失败会 log 但不中断批次。如果只想启动 enabled 子集，**逐个 `start_plugin` 调用**，别用 `start_all`。
+- **`Scheduler` 不会自动 `disconnect` backend**：`shutdown` 只停 worker + dispatcher。Backend 由 `main.py` 负责（典型用 `with backend:` 或 `try/finally`），原因是 emergency stop 的时候不应该切断 device。
+- **Plugin name == graph namespace**：插件 `name = "_demo"` ⇒ 它的 vertex 全部前缀 `_demo.`。要在主图里引用，必须用 `"_demo.demo_screen_1"` 这样的全限定 id。**不要**让 plugin 的 `name` 和已有的根 vertex 名重叠（如 `main_menu`），merge 会爆 `GraphValidationError`。
+- **`PluginContext.sleep` 是 stop-aware，不是 pause-aware**：pause 时 `sleep` 照样计满 seconds（这是有意——pause 是"暂停业务循环"，不是"无限定阻塞"）。要在 pause 期间挂起，用 `wait_until_resumed(poll=0.2)`。
+- **`PluginRegistry.discover` 走 `pkgutil.iter_modules`**：只发现 `plugins/<dir>` 是 Python 包（有 `__init__.py`）的子目录。子目录名以 `__` 开头会被跳过（dunder 保留），但**单下划线开头是 OK 的**（`_demo` 能被发现）。如果新 plugin 不被识别，先检查它有没有 `__init__.py` 并且重新 import。
+
 ## 8. 下一步
 
-**Phase 3 目标**：Plugin 与线程模型。
+**Phase 4 目标**：首个真玩法（端到端可跑的业务循环）。
 
 重点关注：
-1. `core/scheduler/plugin_base.py`——`GameplayPlugin` 抽象基类。每个 `plugins/<name>/__init__.py` 提供一个 `GameplayPlugin` 实例（或工厂），声明 `name`、`needed_vertices`、`tick()`。
-2. `core/scheduler/worker.py`——`Worker` = 一个独立线程，持有 `(account_id, plugin, navigator)`。主线程通过 `queue.Queue` 下命令，`threading.Event` 控制停止。
-3. `core/scheduler/manager.py`——`Scheduler` 类。`start(account_id, plugin_name)` / `stop(account_id, plugin_name)` / `stop_all()`。多账号时为每个 `(account_id, plugin)` 起一个独立 Worker。
-4. **热加载**：扫 `plugins/` 目录，新增子目录运行时能注册。卸载先 stop。
-5. `core/hotkey/`——全局热键启动/暂停玩法。基于 `keyboard` 库（已在 requirements）。
-6. 异常纪律：worker 顶层捕获 `BotError`，写日志 + 重启或抬手；非 `BotError`（如 KeyboardInterrupt）直接抬给主线程。
+1. **挑一个简单循环作为试点**——例如"每日委托：进入委托界面 → 一键收 → 一键派 → 回主界面"。要求：完全靠图导航 + 模板匹配能跑通，**不依赖 OCR**（OCR 留给更复杂的玩法）。
+2. `plugins/<name>/buttons.py`：把所有需要点的按钮、所有需要识别的界面 anchor 全部定义出来。模板用 `dev_tools/template_extractor.py` + `dev_tools/graph_composer.py` 录。
+3. `plugins/<name>/graph.py`：用 DSL 构建子图，**必须**和主图 vertex 用 `external(...)` 连起来，避免命名空间漂移成 dangling edge。
+4. `plugins/<name>/<name>_plugin.py`：实现 `GameplayPlugin`。`requires_vertices` 写真依赖；`run()` 是真业务循环（不是 demo 那样的来回切屏），每个 navigator 调用前查 `should_stop()`，每个长 `sleep` 用 `ctx.sleep` 而非 `time.sleep`。
+5. `graphs/main.py`：把 Phase 2 的 `graphs/_demo.py` 升级成真主图——`main_menu` / `profile` / `shop` / `settings` 等真界面，每个 vertex 配真 `Button` recognizer + 真模板。**Phase 4 之后 `graphs/_demo.py` 可以删，Phase 2 的"假 backend"流程也可以退役**。
+6. **真 backend 联调**：把 `main.py` 里的 `FakeBackend` 换成 `get_input_backend(..., "nemu", mumu_folder=...)`，验证 demo 之外的真插件能在 MuMu 上跑起来。先用 `dev_tools/screen_inspector.py` 校准识别再上 plugin。
+7. **多账号试运行**：在 config 里注册第二个 `(account_id, instance_id)`，两个 nemu 实例同时跑一遍——验证 §S5 多账号原则没漏。
+
+待解决的设计问题（Phase 3 留下来的）：
+- **Navigator 并发**：同一账号上同时跑两个 plugin 会让它们共享 Navigator。要么给 Navigator 加锁（实现简单），要么 Scheduler 强制"每账号同时一个 plugin"（语义清楚但限死扩展性）。Phase 4 选其一。
+- **多账号 OCR 串行**：当前 `OcrEngine` 单例 + RLock，多账号同时 OCR 会排队。等出现"OCR 卡死多账号"再加引擎池。
+- **`stop_plugin` 不强杀**：plugin 若忽略 `should_stop()` 会泄露线程。给 plugin 写指南或自动检测"长时间不查 should_stop"。
+- **配置外置**：目前 `main.py` 的 `_load_config` 是硬编码列表，Phase 4 要换成 YAML（accounts、enabled_plugins、热键自定义、cache 上限），让用户改配置不动代码。
 
 环境层面：
-- `keyboard==0.13.5` 已在 `requirements.txt`，但**还没装**。开始 Phase 3 前：`D:\anaconda3\envs\yys\python.exe -m pip install keyboard==0.13.5`。
-- 线程安全审计：`OcrEngine` 已用 RLock 串行；`InputBackend` 子类的 `_call_lock` 已就绪；`TemplateRepository` 是跨账号共享的，但模板内容不可变所以 OK。`Navigator` / `PathFinder` / `ScreenRecognizer` 当前**没有锁**，假设由所属 Worker 单线程使用，Phase 3 要么遵守这个约定，要么加锁。
+- `keyboard==0.13.5` 已装但**Windows 下非管理员场景会自动降级 noop 并 warning**，不影响开发。CI 上用 `backend="noop"` 通过 `trigger()` 跑测试。
+- Phase 4 开干前不需要新装包；如果决定接 OCR，再装 `paddleocr==2.7.3`。
+- `dev_tools/graph_composer.py` 在 Phase 4 录新插件图时是主力。每录完一个 vertex / edge 立即在画面上拿 `screen_inspector.py` 校准。
