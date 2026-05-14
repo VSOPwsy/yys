@@ -8,7 +8,7 @@
 
 - ✅ Phase 0：项目骨架 + IPC 冒烟测试
 - ✅ Phase 1：核心抽象层（异常体系 / 日志 / TTL 缓存 / Button / TemplateRepository / TemplateMatcher / OCR / InputBackend 抽象 + NemuIpcBackend / 工厂 / dev_tools 模板提取与匹配调试 / 52 项单元测试）
-- ⬜ Phase 2：图导航系统（NetworkX 实例化、跨命名空间 vertex/edge、最短路径搜索）
+- ✅ Phase 2：图导航系统（GameGraph + DSL（subgraph/root_graph/vertex/edge/external + 9 个 action 工厂） / GraphAssembler 含未启用插件 dangling 处理 / PathFinder 含 avoid_risky / avoid_tags / 随机路径 / ScreenRecognizer / Navigator goto + 失败重规划 / dev_tools 三件套（visualizer/screen_inspector/composer） / 52 项新单元测试，全包 104 项通过）
 - ⬜ Phase 3：Plugin 与线程（Worker 池、命令队列、停止 Event、热加载）
 - ⬜ Phase 4：首个玩法（一个完整的可跑业务循环）
 
@@ -439,6 +439,179 @@ CLI 入口：`python dev_tools/vision_debug.py --screenshot <path> --template <n
 
 把匹配框 + 中心点画到原图上，用来调 `Button.threshold` / `Button.region`。
 
+---
+
+### core/navigation/graph.py
+
+#### `Vertex(id, name, recognizer, dwell_time=500, owner=None)`（frozen dataclass）
+
+游戏中一个稳定的 UI 状态。
+
+- `id`：组装后的全限定名，如 `daily_reward.entry`。子图内写 bare name，merge 时由 DSL 加前缀。
+- `name`：日志/工具用的人类可读标签；不传默认 = `id`。
+- `recognizer`：识别"是否在这个界面"。`ScreenRecognizer` 接受 `Button` / `str`（等价 `Button.simple(...)`）/ `(screenshot)->bool` 三种形式；其他类型在使用时报 warning 并跳过。
+- `dwell_time`（int 毫秒）：到达此 vertex 后默认等待时间。`Navigator` 在每条边走完后会等这么久再做识别确认。
+- `owner`：所属命名空间。`merge()` 统一覆盖为传入的 namespace，根图为 `"main"`。
+
+#### `Edge(src, dst, action, cost=1.0, risky=False, tags=(), cooldown=0.0)`（frozen dataclass）
+
+- `src` / `dst`：全限定 vertex id（含点）或根命名空间 bare name。
+- `action`：`Callable[[NavigationContext], None]`，由 DSL action 工厂或自定义函数生产。
+- `cost`：路径权重（秒级估算）。
+- `risky`：标记为"危险"操作（消耗资源、不可逆等）。`PathFinder(avoid_risky=True)` 会绕开。
+- `tags`：自由 tag 元组，`PathFinder(avoid_tags=[...])` 用来排除。
+- `cooldown`：保留字段（Phase 2 只存不执行）。
+
+#### `GameGraph()`
+
+NetworkX `DiGraph` 的封装，附带命名空间合并和 dangling-edge 校验。
+
+- `add_vertex(id, *, name=None, recognizer=None, dwell_time=500, owner=None) -> Vertex`：注册一个 vertex。**重复 id 抛 `GraphValidationError`**；id 已是 ghost（被 `add_edge` 自动建出来）的会被原地"补全"，不会冲突。
+- `add_edge(from_id, to_id, *, action, cost=1.0, risky=False, tags=None, cooldown=0.0) -> Edge`：注册一条 edge。**允许引用尚未注册的 vertex**（跨命名空间前向引用），由 `validate()` 决定后续处理。`(from_id, to_id)` 重复抛 `GraphValidationError`。`cost < 0` / `cooldown < 0` 抛 `ValueError`。
+- `get_vertex(id) -> Vertex` / `get_edge(from_id, to_id) -> Edge`：查找；不存在抛 `UnknownVertex`。
+- `has_vertex(id) -> bool` / `has_edge(from_id, to_id) -> bool` / `__contains__` / `__len__`。
+- `vertex_owner(id) -> str | None`：返回 owner；不存在或仍是 ghost 返回 None。
+- `vertices() -> Iterator[Vertex]` / `edges() -> Iterator[Edge]` / `vertex_ids() -> list[str]`：只迭代"已注册"节点，自动跳过 ghost。
+- `merge(other, namespace) -> GameGraph` ⭐：把 `other` 合并进来，把所有"已注册"vertex 的 owner 改成 `namespace`，并复制所有 edge。**前置条件：`other` 的所有 vertex id 必须以 `<namespace>.` 开头**（这是 DSL 保证的），否则抛 `GraphValidationError`；和 `self` 已有 vertex 重名也抛。`other` 中的 ghost endpoint（跨命名空间前向引用）随 edge 一起带过来，后续由 `validate()` 解决。
+- `validate(*, strict=False) -> list[Edge]`：扫一遍 dangling edges（任一端点是 ghost）。默认从图中删除并 log warning，返回被删的 edge 列表；`strict=True` 时抛 `GraphValidationError`。`self.dangling_edges` 持有最近一次的结果，供调试。
+- `subgraph_of(namespace) -> GameGraph`：浅拷贝出只含某个 owner 的 vertex + 完全在该 owner 内的 edge，调试用。
+- `describe() -> dict`：`{vertices, edges, by_owner, dangling_dropped}`。
+- `nx -> nx.DiGraph`：直接拿底层图，给 PathFinder/可视化工具用；外部不要在生产代码里改。
+
+---
+
+### core/navigation/builder.py — DSL
+
+DSL 入口都依赖一个 **thread-local 上下文栈**，所以 `vertex()` / `edge()` 必须在 `subgraph()` 或 `root_graph()` 块内调用，否则抛 `GraphValidationError`。
+
+#### `NavigationContext(backend, extras=None)`（dataclass）
+
+每个 action 收到的"上下文对象"。Phase 2 只用 `.backend`（`InputBackend` 实例）；`extras` 是 dict，Phase 3 会塞 cache、stop_event 等。
+
+#### 上下文管理器
+
+- `subgraph(name, *, graph=None)` ⭐：进入插件子图上下文。`name` 不能为空。块内 vertex/edge 默认 `owner=name`，bare name 自动加 `<name>.` 前缀。返回（yield）目标 `GameGraph`。
+- `root_graph(*, graph=None)`：进入根（无命名空间）上下文。块内 vertex/edge 默认 `owner="main"`，bare name **不加**前缀。用于 `graphs/main.py`。
+
+两者都可以传 `graph=` 复用已有 `GameGraph`，否则新建。
+
+#### `vertex(id, *, name=None, recognizer=None, dwell_time=500, owner=None) -> str`
+
+向当前 builder 注册一个 vertex；返回**已加前缀的全限定 id**。
+- `owner=None` 时默认为 builder 默认值（`"main"` for root_graph，namespace for subgraph）。
+
+#### `edge(from_id, to_id, *, action, cost=1.0, risky=False, tags=None, cooldown=0.0) -> (src, dst)`
+
+向当前 builder 注册一条 edge。`from_id` / `to_id` 各自走 builder 的 qualify 规则：
+- 不含 `.` 且不是 `_External` → 加 namespace 前缀（root_graph 时不加）；
+- 含 `.` → 原样保留；
+- `external(...)` 包装 → 始终原样保留（即使不含 `.`，根命名空间的入口就用这个）。
+
+#### `external(name) -> _External`
+
+包装一个名字，告诉 DSL "这是绝对引用，别加前缀"。典型场景：插件子图引用根命名空间的 `main_menu`（不含点，bare 形式会被错误加前缀）。
+
+#### Action 工厂（都返回 `Callable[[NavigationContext], None]`）
+
+- `click_button(button: Button)`：调 `ctx.backend.click(button)`。
+- `click_at(x, y, *, randomize=True)`：硬编码点击；草稿里附 "WARNING: hardcoded coordinates" 注释。
+- `swipe_to(start, end, duration=0.3)`：两点滑动。
+- `swipe_dir(direction, distance=300, duration=0.3)`：从当前截图中心向 `"up"`/`"down"`/`"left"`/`"right"` 滑 `distance` 像素。
+- `press_back()`：调 `ctx.backend.press_back()`。**当前 `NemuIpcBackend` 抛 `NotImplementedError`**（nemu DLL 只有触摸通道）；插件可以改用 `click_button(BACK_BTN)`。
+- `wait(seconds)`：纯 `time.sleep`。模拟"加载完成后自动到下一界面"。
+- `compose(*actions)`：顺序执行。
+- `conditional(predicate, then_action, else_action=None)`：运行时分支。`predicate` 是 `(ctx) -> bool`。
+
+---
+
+### core/navigation/assembly.py
+
+#### `GraphAssembler()`
+
+主图 + 多个插件子图 → 一个可运行图。
+
+- `set_main(graph: GameGraph) -> self`：注册主图（再次调用会替换）。
+- `add_subgraph(namespace: str, graph: GameGraph) -> self`：注册插件子图。`namespace` 不能为空，**不能含 `.`**（Phase 2 不支持嵌套命名空间）。重复注册抛 `ValueError`。
+- `main` / `registered_namespaces`：自省属性。
+- `assemble(enabled_plugins: set[str] | None = None, *, strict=False) -> GameGraph` ⭐：
+  - 浅拷贝主图，依次 `merge()` 每个 `enabled_plugins` 中的子图。
+  - `enabled_plugins=None` → 合并全部已注册子图。
+  - 未注册的 namespace 在 `enabled_plugins` 中 → log warning，**不抛**。
+  - 禁用的插件相关 dangling edge（如主图指向 `disabled.entry`）被 `validate()` 删除并 warn。
+  - `strict=True` 时 dangling edge 抛 `GraphValidationError`。
+
+---
+
+### core/navigation/pathfinder.py
+
+#### `PathFinder(graph: GameGraph)`
+
+**不感知命名空间**，输入输出都用全限定 id。
+
+- `shortest_path(start, end, *, avoid_risky=False, avoid_tags=None) -> list[Edge]`：`networkx.shortest_path` 加 `cost` 权重。被 ban 的 edge 权重设为 `inf`，**只有当存在合法路径时才会绕开**；如果所有路径都被 ban，抛 `NoPathFound`。`start == end` 返回 `[]`。
+- `random_path(start, end, *, avoid_risky=False, avoid_tags=None, max_paths=10, max_length_factor=1.5, rng=None) -> list[Edge]` ⭐：先算最短路径长度 L，枚举所有顶点数 ≤ `ceil((L+1) * max_length_factor)` 的简单路径（最多 `max_paths` 条），过滤掉含被 ban edge 的，从剩下的中**均匀随机**选一条。这是"模拟人类不总走最优"的核心。`max_paths < 1` 或 `max_length_factor < 1.0` 抛 `ValueError`。`rng` 注入点供测试用。
+- `all_paths(start, end, *, max_length=None) -> list[list[Edge]]`：所有简单路径，`max_length` 用顶点数限制。
+- 抛 `UnknownVertex`（start/end 不存在）/ `NoPathFound`（无可达路径）。
+
+---
+
+### core/navigation/recognizer.py
+
+#### `ScreenRecognizer(matcher: TemplateMatcher | None = None)`
+
+判断"当前截图属于哪个 vertex"。
+
+- `detect_current(screenshot, graph) -> str | None`：遍历 `graph.vertices()`，对每个的 recognizer 计算结果，返回第一个命中的 vertex id。**多个命中 log warning 但仍返回第一个**（UI 应当互斥，重叠是图 bug）。recognizer 抛异常 log warning 并跳过。
+- `invalidate(vertex_id=None)`：清单个或全部 recognizer 缓存（recognizer 解析过一次后会被缓存，便于热重载模板时强制重算）。
+- recognizer 类型：`Button`（用 matcher.find）、`str`（等价 `Button.simple`）、callable `(screenshot) -> bool`；其他类型 log warning 并跳过该 vertex。
+
+---
+
+### core/navigation/navigator.py
+
+#### `Navigator(backend, graph, pathfinder=None, recognizer=None, *, context_extras=None)`
+
+把 backend、graph、PathFinder、ScreenRecognizer 串起来执行导航。
+
+- `goto(target_id, *, mode="shortest", avoid_risky=False, avoid_tags=None, max_path_replans=1, per_edge_timeout=10.0) -> bool` ⭐：
+  1. 识别当前 vertex（识别失败抛 `CurrentVertexUnknown`）。
+  2. `mode="shortest"` 用 `shortest_path`，`mode="random"` 用 `random_path`；其他值抛 `ValueError`。
+  3. 逐 edge 执行：调 `edge.action(ctx)`，等 `dst.dwell_time` 毫秒，再 `detect_current()` 验证到达 `edge.dst`。
+  4. **未到达**期望 vertex → 重新识别 + 重新规划，最多 `max_path_replans` 次；耗尽后抛 `EdgeExecutionFailed`。识别完全失败抛 `CurrentVertexUnknown`。
+  5. `target_id` 支持全限定（`plugin.foo`）和根命名空间 bare name（`profile`，会查 owner=="main" 的 vertex，多个匹配抛 `UnknownVertex`）。
+  6. `per_edge_timeout`：单 edge 超过该耗时只 log warning，不中断（用来抓 `wait(600)` 这种笔误）。
+- `is_at(vertex_id) -> bool`：当前 vertex 是否 == 指定 id。识别失败返回 False。
+- `detect_current() -> str | None`：截图 + 识别，糖方法。
+
+异常：`UnknownVertex` / `CurrentVertexUnknown` / `NoPathFound` / `EdgeExecutionFailed`，都是 `NavigationError` 子类。
+
+---
+
+### dev_tools/graph_visualizer.py（开发工具，禁被生产代码 import）
+
+CLI：`python dev_tools/graph_visualizer.py (--demo | --build mod:fn) [--out PATH] [--show] [--path FROM TO]`
+
+用 matplotlib + networkx 渲染图。节点按 `owner` 着色，risky edge 画虚线红色，`--path` 高亮一条最短路径。Windows 上自动选 Microsoft YaHei 让 CJK 标签可读。
+
+### dev_tools/screen_inspector.py（开发工具，禁被生产代码 import）
+
+CLI：`python dev_tools/screen_inspector.py --mumu <root> [--instance N] [--display D] [--account-id ID] [--graph mod:fn]`
+
+实时识别工具。打开 MuMu 后跑这个：按 `R` 重新截图 + 跑 `ScreenRecognizer`，在画面上叠加"当前识别为：xxx"。`Q` 退出。`--graph` 不传时用 Phase 2 demo 图。**静态截图驱动，不做视频流。**
+
+### dev_tools/graph_composer.py（开发工具，禁被生产代码 import）⭐
+
+交互式建图工具。CLI：`python dev_tools/graph_composer.py --mumu <root> [--instance N] [--display D] [--account-id ID] [--context-graph mod:fn]`
+
+**核心原则**（CLAUDE.md S3 + Phase 2 spec）：
+1. **所有截图通过 `backend.screenshot()`**，禁用 PIL / mss。
+2. **完全静态截图驱动**：用户按 `R` 主动刷新，期间不做视频流。
+3. **隔离**：模板暂存到 `dev_tools/composer_output/templates_staging/`，用 `P` 一键 promote 到 `templates/`；每次截图存 `composer_output/screenshots/<ts>.png`；草稿即时写入 `composer_output/draft_<session>.py` 和 `state_<session>.json`，崩溃不丢。
+
+**键位**：`R` 刷新 / `V` 标记当前画面为 vertex（含 anchor 模板提取）/ `T` 仅提取模板 / `E` 录制 edge（再选类型 1-6：click_button / wait / press_back / swipe / click_at / compose）/ `W` 对最后一条 edge 加 risky/tag/cost / `U` 撤销最后一步 / `S` 立即保存草稿 / `P` 把 staging 中的模板 promote 到 `templates/` / `H` 帮助 / `Q` 退出（提示保存）。
+
+`click_at` 输出会在草稿里附 "WARNING: hardcoded coordinates" 注释。`press_back` 在 nemu backend 上会抛 `NotImplementedError`，工具会提示改用 `click_button`。
+
 ## 7. 已知问题与陷阱
 
 - **DLL 截图格式**：返回 BGRA 且上下颠倒。需 `cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)` + `cv2.flip(img, 0, dst=img)`。错过这一步保存的 PNG 颜色异常、上下镜像。
@@ -453,17 +626,24 @@ CLI 入口：`python dev_tools/vision_debug.py --screenshot <path> --template <n
 - **`TM_CCOEFF_NORMED` 对单色模板退化**：纯白/纯黑模板方差为 0，匹配分数处处 NaN 或 1.0，会让 `find_all` 返回成千上万个"匹配"。模板必须带可识别的细节（边框、内部图形、文字等）。已在 `tests/test_template_matcher.py` 的 fixture 里加了图案。
 - **`paddleocr` 不在 Phase 1 默认装**：`core/vision/ocr.py` 内部惰性 import，所以 `import core` 不会报错。真要用 OCR 时 `conda run -n yys pip install paddleocr==2.7.3`。`requirements.txt` 已经固定版本。
 - **VSCode 默认解释器 ≠ `yys` 环境**：IDE 提示"package not installed"是因为它指向系统 Python310。要么在 VSCode 右下角切到 `D:\anaconda3\envs\yys\python.exe`，要么忽略提示。命令行只用 `yys` python 即可。
+- **DSL 与 `merge()` 的分工**：`subgraph()` / `root_graph()` 上下文负责 *所有* 命名空间前缀；`GameGraph.merge()` 已经不再做二次前缀，只做拷贝 + owner 戳 + 命名空间一致性校验。子图内部要引用根命名空间的 vertex（如 `main_menu`，不含点）必须用 `external("main_menu")`，否则会被当成相对名加前缀，merge 后变成 `<plugin>.main_menu` 死边。
+- **Ghost endpoint 是合法状态**：跨命名空间 edge 在 merge 之前会在底层 `networkx.DiGraph` 里建出"没有 `vertex` 数据"的占位节点。`GameGraph.vertices()` / `vertex_ids()` 已经自动跳过它们；外部不要直接遍历 `graph.nx.nodes`，要遍历 `graph.vertices()`。`validate()` 会把仍然 ghost 的 endpoint 上的 edge 当 dangling 处理。
+- **`press_back()` 在 nemu backend 上不可用**：nemu IPC DLL 只有触摸通道，无系统键。`InputBackend.press_back()` 默认抛 `NotImplementedError`，`NemuIpcBackend` 未重写。需要"返回"语义时用 `click_button(BACK_BTN)`。这是 `graph_composer.py` 在录制 press_back edge 时会主动提示的一种用法。
+- **`networkx==3.3` 必须装在 `yys` 环境**：Phase 2 开干前要 `D:\anaconda3\envs\yys\python.exe -m pip install networkx==3.3`。`matplotlib==3.10.9` 也需要装，但只有 `dev_tools/graph_visualizer.py` 用，生产代码绝不 import。
+- **`graph_composer` 必须在真模拟器上跑**：工具会真的对模拟器执行点击/滑动来录制 edge——这是录制 edge 的唯一可靠方式，无法 mock 掉。所有调试输出隔离到 `dev_tools/composer_output/`，不会污染正式 `templates/`。
 
 ## 8. 下一步
 
-**Phase 2 目标**：基于 NetworkX 搭起图导航层。
+**Phase 3 目标**：Plugin 与线程模型。
 
 重点关注：
-1. `core/navigation/vertex.py` / `edge.py`——`Vertex` = 稳定 UI 状态（如 `main.main_menu`、`plugins.daily.entry`），`Edge` 持有 `action`（`Button` 引用或 lambda(backend) 回调）、`cost`（耗时）、`risky`（消耗资源）。
-2. `core/navigation/graph.py`——`Navigator` 类，按账号构造（多账号就绪）。内部用 `networkx.DiGraph`。支持 `register_vertex(qualified_name, ...)`、`register_edge(src, dst, ...)`、`shortest_path(src, dst, avoid_risky=True)`。
-3. **命名空间合并**：主图（`graphs/main.py`）只注册全局骨架；插件子图（`plugins/<name>/graph.py`）注册自己的 vertex，引用别人 vertex 必须用全限定名 `<plugin>.<vertex>`。**重复定义即报错**。
-4. `core/navigation/runner.py`——`travel(navigator, target_vertex)`：拿当前截图 → 识别当前 vertex → 沿最短路径执行 edges → 每步后验证到达。失败时抛 `NavigationError` 子类（`NoPathFound`、`UnknownVertex`、`EdgeExecutionFailed`）。
-5. `tests/test_navigation_*.py`——纯图操作单元测试 + 一个模拟 backend 的集成测试。
+1. `core/scheduler/plugin_base.py`——`GameplayPlugin` 抽象基类。每个 `plugins/<name>/__init__.py` 提供一个 `GameplayPlugin` 实例（或工厂），声明 `name`、`needed_vertices`、`tick()`。
+2. `core/scheduler/worker.py`——`Worker` = 一个独立线程，持有 `(account_id, plugin, navigator)`。主线程通过 `queue.Queue` 下命令，`threading.Event` 控制停止。
+3. `core/scheduler/manager.py`——`Scheduler` 类。`start(account_id, plugin_name)` / `stop(account_id, plugin_name)` / `stop_all()`。多账号时为每个 `(account_id, plugin)` 起一个独立 Worker。
+4. **热加载**：扫 `plugins/` 目录，新增子目录运行时能注册。卸载先 stop。
+5. `core/hotkey/`——全局热键启动/暂停玩法。基于 `keyboard` 库（已在 requirements）。
+6. 异常纪律：worker 顶层捕获 `BotError`，写日志 + 重启或抬手；非 `BotError`（如 KeyboardInterrupt）直接抬给主线程。
 
 环境层面：
-- `networkx==3.3` 已在 `requirements.txt`，但**还没装**。开始 Phase 2 前：`D:\anaconda3\envs\yys\python.exe -m pip install networkx==3.3`。
+- `keyboard==0.13.5` 已在 `requirements.txt`，但**还没装**。开始 Phase 3 前：`D:\anaconda3\envs\yys\python.exe -m pip install keyboard==0.13.5`。
+- 线程安全审计：`OcrEngine` 已用 RLock 串行；`InputBackend` 子类的 `_call_lock` 已就绪；`TemplateRepository` 是跨账号共享的，但模板内容不可变所以 OK。`Navigator` / `PathFinder` / `ScreenRecognizer` 当前**没有锁**，假设由所属 Worker 单线程使用，Phase 3 要么遵守这个约定，要么加锁。
