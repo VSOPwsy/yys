@@ -20,6 +20,9 @@ from core.input_backend.base import InputBackend
 from core.logging_config import get_logger
 from core.vision.template_matcher import TemplateMatcher
 
+if False:  # pragma: no cover — typing-only import
+    from core.scheduler.throttle import Throttle
+
 # NOTE: importing nemu_ipc transitively pulls in a slice of Alas runtime
 # (logger, ConfigUpdater glue) — see CLAUDE.md S7 "vendor 依赖膨胀".
 # Lazy-import inside the constructor to keep this module cheap to import.
@@ -37,6 +40,10 @@ class NemuIpcBackend(InputBackend):
         instance_id: int = 0,
         display_id: int = 0,
         matcher: Optional[TemplateMatcher] = None,
+        *,
+        throttle: "Optional[Throttle]" = None,
+        jitter_radius: Optional[int] = None,
+        post_delay_variance: float = 0.0,
     ) -> None:
         """Construct an unconnected backend bound to a MuMu instance.
 
@@ -56,7 +63,13 @@ class NemuIpcBackend(InputBackend):
             BackendNotAvailable: `mumu_folder` is invalid, points at the
                 Global edition, or the DLL is missing / too old.
         """
-        super().__init__(account_id=account_id, matcher=matcher)
+        super().__init__(
+            account_id=account_id,
+            matcher=matcher,
+            throttle=throttle,
+            jitter_radius=jitter_radius,
+            post_delay_variance=post_delay_variance,
+        )
 
         if "MuMuPlayerGlobal" in mumu_folder:
             raise BackendNotAvailable(
@@ -157,6 +170,7 @@ class NemuIpcBackend(InputBackend):
         return self._postprocess(raw)
 
     def click_xy(self, x: int, y: int, randomize: bool = True) -> None:
+        self._acquire_action_slot()
         tx, ty = (self._jitter(x, y) if randomize else (x, y))
         try:
             with self._call_lock:
@@ -174,6 +188,7 @@ class NemuIpcBackend(InputBackend):
     def long_click_xy(self, x: int, y: int, duration: float) -> None:
         if duration <= 0:
             raise ValueError(f"duration must be > 0, got {duration}")
+        self._acquire_action_slot()
         tx, ty = self._jitter(x, y) if duration < 1.5 else (x, y)
         try:
             with self._call_lock:
@@ -195,6 +210,7 @@ class NemuIpcBackend(InputBackend):
     ) -> None:
         if duration <= 0:
             raise ValueError(f"duration must be > 0, got {duration}")
+        self._acquire_action_slot()
         # Swipe = fewer interpolation steps + minimal hold at the endpoint
         # = the emulator registers fling momentum.
         self._stroke(p1, p2, duration, steps=max(6, int(duration * 30)), hold_at_end=0.0)
@@ -207,6 +223,7 @@ class NemuIpcBackend(InputBackend):
     ) -> None:
         if duration <= 0:
             raise ValueError(f"duration must be > 0, got {duration}")
+        self._acquire_action_slot()
         # Drag = many fine steps + small hold at endpoint so the emulator
         # interprets it as a controlled move, not a flick.
         self._stroke(

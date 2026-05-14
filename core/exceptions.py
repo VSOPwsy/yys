@@ -201,3 +201,45 @@ class WorkerAlreadyRunning(PluginError):
     Defensive guard — duplicated `start_plugin` calls are almost always a
     bug in the caller. Stop first, then start.
     """
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 additions
+# --------------------------------------------------------------------------- #
+class AccountBusy(PluginError):
+    """Tried to start a second plugin on an account that already has one running.
+
+    Phase 4 enforces "one plugin per account at a time" as the default
+    scheduler policy — see CLAUDE.md S5 for the multi-account-readiness
+    rationale and S7 for the Navigator concurrency note. Opt out per
+    `Scheduler(concurrent_plugins=True)` when you've audited Navigator
+    sharing for your use case.
+    """
+
+
+class ThrottleTimeout(BotError):
+    """A `Throttle.wait(timeout=...)` budget elapsed before allowance freed up.
+
+    Use sparingly — most callers should let `wait()` block. Surfaced for
+    diagnostics when the project's `max_actions_per_minute` is so tight
+    that a plugin is starving.
+    """
+
+
+class RecoveryFailed(PluginError):
+    """`GameplayPlugin.handle_unexpected_error` could not return to a safe state.
+
+    Raised after `MAX_RECOVERY_ATTEMPTS` attempts of `recover_to_main`
+    all failed. Worker takes this as "stop the plugin and notify the
+    scheduler" — its status stays ERROR and a stop is signalled.
+    """
+
+
+class ConfigError(BotError):
+    """`config/config.yaml` (or the loader) produced an invalid configuration.
+
+    Raised by `core.config.load_config` for: missing required keys,
+    invalid types, unknown plugins listed under an account, contradictory
+    long-run policy values, etc. Surfaces in `main.py` before any
+    backend is constructed so the operator sees the problem early.
+    """

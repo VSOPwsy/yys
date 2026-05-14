@@ -9,6 +9,7 @@ import time
 import pytest
 
 from core.exceptions import (
+    AccountBusy,
     AccountNotRegistered,
     PluginNotRegistered,
     PluginRequirementUnmet,
@@ -148,9 +149,24 @@ def test_requires_vertices_enforced():
         sched.start_plugin("picky", "alice")
 
 
-def test_multi_plugin_per_account():
+def test_multi_plugin_per_account_blocked_by_default():
+    """Phase 4 default: second plugin on the same account raises AccountBusy."""
     reg = _make_registry(_LongLoopPlugin, _OnceLooper)
-    sched = Scheduler(reg)
+    sched = Scheduler(reg)  # concurrent_plugins=False is the default
+    sched.register_account(_make_runtime("alice"))
+    w1 = sched.start_plugin("looper", "alice")
+    try:
+        w1.plugin.run_started.wait(timeout=1.0)
+        with pytest.raises(AccountBusy):
+            sched.start_plugin("looper_b", "alice")
+    finally:
+        sched.stop_all(timeout=2.0)
+
+
+def test_multi_plugin_per_account_opt_in():
+    """Concurrent plugins are still possible when explicitly opted in."""
+    reg = _make_registry(_LongLoopPlugin, _OnceLooper)
+    sched = Scheduler(reg, concurrent_plugins=True)
     sched.register_account(_make_runtime("alice"))
     sched.start_plugin("looper", "alice")
     sched.start_plugin("looper_b", "alice")
@@ -203,7 +219,9 @@ def test_pause_resume_round_trip():
 
 def test_pause_all_then_toggle():
     reg = _make_registry(_LongLoopPlugin, _OnceLooper)
-    sched = Scheduler(reg)
+    # Opt in to concurrent plugins so we can exercise toggle_pause_all with
+    # multiple workers on one account. Phase 4 default is False.
+    sched = Scheduler(reg, concurrent_plugins=True)
     sched.register_account(_make_runtime("alice"))
     w1 = sched.start_plugin("looper", "alice")
     w2 = sched.start_plugin("looper_b", "alice")

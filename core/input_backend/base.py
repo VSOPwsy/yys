@@ -21,14 +21,18 @@ from __future__ import annotations
 import abc
 import random
 import time
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import numpy as np
 
+from core import humanize as _humanize
 from core.exceptions import MatchTimeout
 from core.logging_config import get_logger
 from core.vision.button import Button
 from core.vision.template_matcher import TemplateMatcher
+
+if TYPE_CHECKING:  # pragma: no cover
+    from core.scheduler.throttle import Throttle
 
 ClickTarget = Union[Button, Tuple[int, int]]
 
@@ -44,6 +48,10 @@ class InputBackend(abc.ABC):
         self,
         account_id: str,
         matcher: Optional[TemplateMatcher] = None,
+        *,
+        throttle: Optional["Throttle"] = None,
+        jitter_radius: Optional[int] = None,
+        post_delay_variance: float = 0.0,
     ) -> None:
         """Store per-account identity. Subclasses must call `super().__init__()`.
 
@@ -54,14 +62,37 @@ class InputBackend(abc.ABC):
             matcher: Inject a shared `TemplateMatcher`. Defaults to a private
                 one. Sharing is fine and saves memory because templates are
                 immutable.
+            throttle: Optional `Throttle` consulted before every action-emitting
+                call (`click`, `swipe`, `drag`, `long_click_xy`). None
+                disables rate-limiting (Phase 1-3 behavior; tests pass None
+                so they don't pace themselves to death).
+            jitter_radius: Pixel radius applied by `_jitter()` when
+                `randomize=True`. None falls back to the legacy 3px square
+                jitter; supplying a number enables disk-uniform jitter via
+                `core.humanize.jitter_point` and is what Phase 4 conservative
+                profiles use (8-12px).
+            post_delay_variance: Fraction of `Button.post_delay` to fuzz on
+                each click. 0 disables fuzzing (Phase 1-3 behavior). 0.3
+                yields a uniformly random delay in
+                `[post_delay*0.7, post_delay*1.3]`.
 
         Raises:
-            ValueError: `account_id` is empty.
+            ValueError: `account_id` is empty, `jitter_radius < 0`, or
+                `post_delay_variance < 0`.
         """
         if not account_id:
             raise ValueError("account_id must be a non-empty string")
+        if jitter_radius is not None and jitter_radius < 0:
+            raise ValueError(f"jitter_radius must be >= 0, got {jitter_radius}")
+        if post_delay_variance < 0:
+            raise ValueError(
+                f"post_delay_variance must be >= 0, got {post_delay_variance}"
+            )
         self._account_id = account_id
         self._matcher = matcher or TemplateMatcher()
+        self._throttle = throttle
+        self._jitter_radius = jitter_radius
+        self._post_delay_variance = float(post_delay_variance)
         self._log = get_logger(f"input.{account_id}")
 
     # ------------------------------------------------------------------ #
@@ -76,6 +107,27 @@ class InputBackend(abc.ABC):
     def matcher(self) -> TemplateMatcher:
         """Shared template matcher (lets callers reach the template cache)."""
         return self._matcher
+
+    @property
+    def throttle(self) -> Optional["Throttle"]:
+        """Configured `Throttle`, or `None` if rate-limiting is disabled."""
+        return self._throttle
+
+    def set_throttle(self, throttle: Optional["Throttle"]) -> None:
+        """Replace the throttle after construction (used by main.py wiring)."""
+        self._throttle = throttle
+
+    def _acquire_action_slot(self) -> None:
+        """Block via throttle (if any) before emitting an input action.
+
+        Called from `click()` and the high-level convenience methods.
+        Direct primitives (`click_xy` / `swipe` / `drag` / `long_click_xy`)
+        in `NemuIpcBackend` also call this so plugins can't accidentally
+        bypass the rate limit by reaching for the low level. `FakeBackend`
+        no-ops the primitives so it doesn't need to.
+        """
+        if self._throttle is not None:
+            self._throttle.wait()
 
     @abc.abstractmethod
     def connect(self) -> None:
@@ -231,11 +283,19 @@ class InputBackend(abc.ABC):
             x, y = target
             delay = 0.0 if post_delay is None else post_delay
 
+        # NOTE: throttling lives in the concrete backend's primitives
+        # (`click_xy` / `swipe` / `drag` / `long_click_xy`). The screenshot
+        # + match step above intentionally does NOT consume rate budget —
+        # recognition is read-only and shouldn't count against an "actions
+        # per minute" cap.
         self._log.debug("click %s at (%d, %d) delay=%.2f",
                         getattr(target, "display_name", "(xy)"), x, y, delay)
         self.click_xy(x, y, randomize=randomize)
         if delay > 0:
-            time.sleep(delay)
+            # Fuzz the post-delay slightly so back-to-back identical actions
+            # don't have suspicious millisecond-accurate cadence. Variance=0
+            # falls back to the exact `delay` value.
+            _humanize.human_sleep(delay, variance=self._post_delay_variance)
         return x, y
 
     def find(self, button: Button) -> Optional[Tuple[int, int]]:
@@ -304,20 +364,29 @@ class InputBackend(abc.ABC):
     # ------------------------------------------------------------------ #
     # Helpers shared by concrete backends
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _jitter(x: int, y: int, radius: int = 3) -> Tuple[int, int]:
-        """Return (x, y) shifted by up to ``radius`` pixels in each axis.
+    def _jitter(self, x: int, y: int, radius: Optional[int] = None) -> Tuple[int, int]:
+        """Return (x, y) shifted by up to ``radius`` pixels.
 
         Concrete backends call this from `click_xy` / `long_click_xy` when
         `randomize=True`. Kept on the base so every backend humanizes input
         the same way.
+
+        If `radius` is not provided, falls back to the constructor's
+        `jitter_radius` (Phase 4 humanize profile); if that is also `None`,
+        defaults to the legacy 3px square jitter. When a radius is in
+        effect, sampling is disk-uniform via `core.humanize.jitter_point`
+        — gentler corners than the legacy `randint` square.
         """
-        if radius <= 0:
+        effective = radius if radius is not None else self._jitter_radius
+        if effective is None:
+            # Phase 1-3 behavior: square randint jitter at 3px.
+            return (
+                x + random.randint(-3, 3),
+                y + random.randint(-3, 3),
+            )
+        if effective <= 0:
             return x, y
-        return (
-            x + random.randint(-radius, radius),
-            y + random.randint(-radius, radius),
-        )
+        return _humanize.jitter_point(x, y, effective)
 
     # ------------------------------------------------------------------ #
     # Context manager sugar

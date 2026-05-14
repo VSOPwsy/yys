@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from core.exceptions import (
+    AccountBusy,
     AccountNotRegistered,
     PluginRequirementUnmet,
     WorkerAlreadyRunning,
@@ -90,6 +91,8 @@ class Scheduler:
         registry: PluginRegistry,
         *,
         graceful_stop_timeout: float = 10.0,
+        concurrent_plugins: bool = False,
+        inter_plugin_gap: float = 0.0,
     ) -> None:
         """Construct a scheduler. The dispatcher thread is NOT started yet.
 
@@ -99,13 +102,36 @@ class Scheduler:
                 multiple scheduler instances (e.g., for tests).
             graceful_stop_timeout: Seconds to wait for each worker to
                 drain on stop. Applied per worker.
+            concurrent_plugins: Phase 4 default is **False** — only one
+                plugin may be RUNNING/PAUSED per account at a time, because
+                `Navigator` is not thread-safe and shared per account
+                (CLAUDE.md S7 Phase 3 caveat). Set True when you've audited
+                the Navigator sharing pattern for your plugins. Existing
+                Phase 3 tests that depended on parallel plugins must opt in.
+            inter_plugin_gap: Seconds between when one plugin's worker
+                finishes (joins) and the next plugin on the same account
+                may start. Phase 4 anti-detection knob — prevents "plugin
+                A ended at T, plugin B started at T+0.1" patterns. 0
+                disables the gap.
+
+        Raises:
+            ValueError: `inter_plugin_gap < 0`.
         """
+        if inter_plugin_gap < 0:
+            raise ValueError(
+                f"inter_plugin_gap must be >= 0, got {inter_plugin_gap}"
+            )
         self._registry = registry
         self._graceful_stop_timeout = graceful_stop_timeout
+        self._concurrent_plugins = bool(concurrent_plugins)
+        self._inter_plugin_gap = float(inter_plugin_gap)
 
         self._lock = threading.RLock()
         self._accounts: Dict[str, AccountRuntime] = {}
         self._workers: Dict[str, Dict[str, PluginWorker]] = {}
+        # Last `time.monotonic()` at which a worker for this account finished.
+        # Consulted before `start_plugin` to enforce `inter_plugin_gap`.
+        self._last_finished_at: Dict[str, float] = {}
 
         self._command_queue: "queue.Queue[object]" = queue.Queue()
         self._dispatcher_thread: Optional[threading.Thread] = None
@@ -195,7 +221,19 @@ class Scheduler:
             PluginRequirementUnmet: assembled graph is missing one of
                 `plugin.requires_vertices`.
             WorkerAlreadyRunning: a worker for this pair is already alive.
+            AccountBusy: another plugin on this account is alive and the
+                scheduler was constructed with `concurrent_plugins=False`
+                (the Phase 4 default).
         """
+        # The inter-plugin gap is honored OUTSIDE the lock — we don't want
+        # to block other state queries while we sit on a sleep.
+        gap_wait = self._compute_inter_plugin_gap(account_id)
+        if gap_wait > 0:
+            log.info(
+                "inter_plugin_gap: account=%r waiting %.2fs before start",
+                account_id, gap_wait,
+            )
+            time.sleep(gap_wait)
         with self._lock:
             runtime = self._get_account(account_id)
             plugin_cls = self._registry.get(plugin_name)
@@ -205,6 +243,21 @@ class Scheduler:
                 raise WorkerAlreadyRunning(
                     f"worker for ({account_id!r}, {plugin_name!r}) already alive"
                 )
+
+            # Phase 4: enforce one-plugin-per-account unless explicitly opted out.
+            # Navigator (per-account) is not thread-safe today, so parallel
+            # plugins on the same backend would race the screenshot+match+tap.
+            if not self._concurrent_plugins:
+                busy = [
+                    name for name, w in self._workers.get(account_id, {}).items()
+                    if w.is_alive() and name != plugin_name
+                ]
+                if busy:
+                    raise AccountBusy(
+                        f"account {account_id!r} already has plugin {busy[0]!r} "
+                        f"running; scheduler is in single-plugin-per-account mode "
+                        f"(construct Scheduler(concurrent_plugins=True) to opt out)"
+                    )
 
             plugin = plugin_cls()
             missing = [
@@ -248,7 +301,13 @@ class Scheduler:
             if worker is None:
                 return True
         # Release the lock for the join — stop() may take seconds.
-        return worker.stop(timeout=timeout or self._graceful_stop_timeout)
+        result = worker.stop(timeout=timeout or self._graceful_stop_timeout)
+        # Record the finish time so the next start_plugin on this account
+        # honors inter_plugin_gap. Matters when callers stop plugins one
+        # at a time rather than via stop_all().
+        with self._lock:
+            self._last_finished_at[account_id] = time.monotonic()
+        return result
 
     def pause_plugin(self, plugin_name: str, account_id: str) -> None:
         worker = self._get_worker_or_none(account_id, plugin_name)
@@ -436,6 +495,22 @@ class Scheduler:
             workers = list(self._workers.get(account_id, {}).values())
         for w in workers:
             w.stop(timeout=timeout)
+        # Record the time the last worker exited; the next start_plugin
+        # on this account will honor inter_plugin_gap if configured.
+        if workers:
+            with self._lock:
+                self._last_finished_at[account_id] = time.monotonic()
+
+    def _compute_inter_plugin_gap(self, account_id: str) -> float:
+        """How long to wait before starting another plugin on `account_id`."""
+        if self._inter_plugin_gap <= 0:
+            return 0.0
+        with self._lock:
+            last = self._last_finished_at.get(account_id, 0.0)
+        if last == 0.0:
+            return 0.0
+        elapsed = time.monotonic() - last
+        return max(0.0, self._inter_plugin_gap - elapsed)
 
     def __repr__(self) -> str:
         with self._lock:

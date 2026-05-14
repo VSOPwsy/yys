@@ -18,7 +18,9 @@ between accounts (CLAUDE.md S5).
 from __future__ import annotations
 
 import abc
+import datetime as _dt
 import logging
+import pathlib
 import threading
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, List, Optional, TYPE_CHECKING
@@ -165,6 +167,19 @@ class GameplayPlugin(abc.ABC):
     display_name: ClassVar[str] = ""
     requires_vertices: ClassVar[List[str]] = []
 
+    # ------------------------------------------------------------------ #
+    # Phase 4 recovery policy (override in subclasses as needed)
+    # ------------------------------------------------------------------ #
+    # Vertex id to navigate back to when run() raises unexpectedly.
+    # Convention: the root main menu. Plugins that live in a sub-screen
+    # they exclusively own (e.g. a UI lockout) can point this elsewhere.
+    SAFE_VERTEX: ClassVar[str] = "main_menu"
+    # How many times `recover_to_main` is retried before giving up.
+    MAX_RECOVERY_ATTEMPTS: ClassVar[int] = 3
+    # When False, the worker skips recovery and only logs the error.
+    # Plugins that prefer to handle their own error path can disable this.
+    AUTO_RECOVER_ON_UNEXPECTED_ERROR: ClassVar[bool] = True
+
     def __init__(self) -> None:
         cls = type(self)
         if not cls.name:
@@ -229,6 +244,134 @@ class GameplayPlugin(abc.ABC):
 
     def on_resume(self, ctx: PluginContext) -> None:
         """Called once when the pause flag is cleared."""
+
+    # ------------------------------------------------------------------ #
+    # Phase 4 recovery hooks
+    # ------------------------------------------------------------------ #
+    def save_error_screenshot(
+        self,
+        ctx: PluginContext,
+        exc: BaseException,
+        *,
+        log_root: Optional[pathlib.Path] = None,
+    ) -> Optional[pathlib.Path]:
+        """Snapshot the current frame to ``logs/<account>/error/<ts>_<plugin>.png``.
+
+        Called by `PluginWorker` after `run()` raises an unexpected
+        exception (any exception, including `BotError` subclasses). The
+        screenshot helps post-mortem debug the actual screen state — log
+        text alone is rarely enough.
+
+        Args:
+            ctx: Active PluginContext.
+            exc: The exception that brought us here (recorded in the
+                companion ``.txt`` log entry, NOT the PNG itself).
+            log_root: Override the project's `logs/` root. Defaults to
+                ``<cwd>/logs``. Tests inject a tmp path.
+
+        Returns:
+            Absolute `Path` to the saved PNG, or `None` if the screenshot
+            attempt itself failed (we never re-raise from recovery — the
+            caller already has a primary error to surface).
+        """
+        try:
+            import cv2  # local import: vision deps may be heavy in tests
+        except Exception as e:  # pragma: no cover — cv2 absent in stripped envs
+            ctx.logger.warning(
+                "save_error_screenshot: cv2 unavailable (%s) — skipping", e
+            )
+            return None
+
+        root = log_root or pathlib.Path("logs")
+        out_dir = root / ctx.account_id / "error"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            ctx.logger.warning(
+                "save_error_screenshot: cannot create %s: %s", out_dir, e
+            )
+            return None
+
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        png_path = out_dir / f"{ts}_{self.name}.png"
+        try:
+            shot = ctx.backend.screenshot()
+        except Exception as e:  # noqa: BLE001
+            ctx.logger.warning(
+                "save_error_screenshot: backend.screenshot() raised %s: %s",
+                type(e).__name__, e,
+            )
+            return None
+        try:
+            cv2.imwrite(str(png_path), shot)
+        except Exception as e:  # noqa: BLE001
+            ctx.logger.warning(
+                "save_error_screenshot: cv2.imwrite failed: %s", e
+            )
+            return None
+        ctx.logger.info(
+            "saved error screenshot to %s (exc=%s: %s)",
+            png_path, type(exc).__name__, exc,
+        )
+        return png_path
+
+    def recover_to_main(self, ctx: PluginContext) -> bool:
+        """Single attempt at navigating back to `SAFE_VERTEX`.
+
+        Returns:
+            True iff the navigator confirmed arrival. False on any error —
+            navigator exception, recognition failure, etc. Never raises.
+        """
+        target = self.SAFE_VERTEX
+        try:
+            return bool(ctx.navigator.goto(target))
+        except Exception as e:  # noqa: BLE001
+            ctx.logger.warning(
+                "recover_to_main: navigator.goto(%r) raised %s: %s",
+                target, type(e).__name__, e,
+            )
+            return False
+
+    def handle_unexpected_error(
+        self,
+        ctx: PluginContext,
+        exc: BaseException,
+    ) -> bool:
+        """Worker-invoked recovery flow. Override for plugin-specific logic.
+
+        Default flow:
+            1. `save_error_screenshot` (best effort).
+            2. Try `recover_to_main` up to `MAX_RECOVERY_ATTEMPTS` times.
+            3. Return True iff one of the attempts succeeded.
+
+        Subclasses that need a different "safe state" or extra cleanup
+        (close popup, exit combat, etc.) should override **and call
+        super()** so the screenshot still happens.
+
+        Returns:
+            True iff we ended at a known-good vertex. False = scheduler
+            should treat the plugin as wedged.
+        """
+        self.save_error_screenshot(ctx, exc)
+        for attempt in range(1, self.MAX_RECOVERY_ATTEMPTS + 1):
+            if ctx.should_stop():
+                ctx.logger.info(
+                    "recovery aborted at attempt %d/%d: stop requested",
+                    attempt, self.MAX_RECOVERY_ATTEMPTS,
+                )
+                return False
+            ctx.logger.info(
+                "recovery attempt %d/%d: navigating to %r",
+                attempt, self.MAX_RECOVERY_ATTEMPTS, self.SAFE_VERTEX,
+            )
+            if self.recover_to_main(ctx):
+                ctx.logger.info("recovery succeeded on attempt %d", attempt)
+                return True
+        ctx.logger.error(
+            "recovery failed after %d attempts; plugin will be stopped",
+            self.MAX_RECOVERY_ATTEMPTS,
+        )
+        return False
 
     # ------------------------------------------------------------------ #
     # Convenience
