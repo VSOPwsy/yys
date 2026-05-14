@@ -18,3 +18,5 @@ keyboard==0.13.5
 
 # Dev / tests
 pytest==9.0.3
+# Used only by dev_tools/graph_visualizer.py — production runtime does not import it.
+matplotlib==3.10.9
