@@ -14,7 +14,12 @@ Hierarchy
     |   +-- TemplateNotFound
     |   +-- MatchTimeout
     |   +-- OcrError
-    +-- NavigationError      (reserved for Phase 2)
+    +-- NavigationError
+    |   +-- GraphValidationError
+    |   +-- NoPathFound
+    |   +-- UnknownVertex
+    |   +-- CurrentVertexUnknown
+    |   +-- EdgeExecutionFailed
     +-- PluginError          (reserved for Phase 3)
 """
 
@@ -98,11 +103,49 @@ class OcrError(VisionError):
 # Navigation (Phase 2)
 # --------------------------------------------------------------------------- #
 class NavigationError(BotError):
-    """Anything that goes wrong inside `core.navigation`.
+    """Anything that goes wrong inside `core.navigation`."""
 
-    Reserved for Phase 2. Subclasses will cover "no path between A and B",
-    "current vertex unknown", "edge action did not produce expected vertex",
-    etc.
+
+class GraphValidationError(NavigationError):
+    """A graph failed structural validation (dangling edges, dup vertex, ...).
+
+    Raised by `GameGraph.validate(strict=True)` and by `GraphAssembler.assemble`
+    when its inputs are internally inconsistent (e.g. a subgraph defines a
+    vertex that another subgraph already owns).
+    """
+
+
+class NoPathFound(NavigationError):
+    """`PathFinder` could not connect source and target.
+
+    Either the destination is unreachable from the source given the current
+    constraints (avoid_risky / avoid_tags / max_length_factor), or the
+    destination itself is unknown to the graph.
+    """
+
+
+class UnknownVertex(NavigationError):
+    """A vertex id was referenced but does not exist in the graph.
+
+    Raised by Navigator / PathFinder / GameGraph helpers when the caller hands
+    in a typo'd or stale id. Distinct from `NoPathFound` because the cause is
+    a missing definition, not topology.
+    """
+
+
+class CurrentVertexUnknown(NavigationError):
+    """`ScreenRecognizer` could not identify the current screen.
+
+    Navigation cannot start from "?", so this is fatal for `goto()` unless the
+    caller retries after the UI settles.
+    """
+
+
+class EdgeExecutionFailed(NavigationError):
+    """An edge's `action` ran but the UI did not arrive at the expected vertex.
+
+    The action did not raise — it was the post-condition (recognizing the
+    destination) that failed. Hand to a higher level so it can replan or escalate.
     """
 
 

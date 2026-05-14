@@ -168,6 +168,22 @@ class InputBackend(abc.ABC):
             ValueError: `duration <= 0`.
         """
 
+    def press_back(self) -> None:
+        """Press the Android back / system-escape key.
+
+        Default implementation raises `NotImplementedError`. Backends that
+        can send system key events (scrcpy, ADB) should override; the nemu
+        IPC DLL only handles touch and cannot honor this. Plugin authors
+        running on nemu should model "back" as `click_button(BACK_BTN)`
+        instead — the `press_back()` action factory will still call this
+        method and surface the failure cleanly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement press_back(). "
+            f"Use click_button(BACK_BTN) instead, or switch to a backend "
+            f"that supports keyevents."
+        )
+
     # ------------------------------------------------------------------ #
     # High-level helpers — implemented once on the base. Don't override.
     # ------------------------------------------------------------------ #
