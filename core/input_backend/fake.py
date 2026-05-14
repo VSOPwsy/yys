@@ -58,8 +58,17 @@ class FakeBackend(InputBackend):
         *,
         account_id: str = "fake",
         matcher: TemplateMatcher | None = None,
+        throttle=None,  # Optional[core.scheduler.throttle.Throttle]
+        jitter_radius: int | None = None,
+        post_delay_variance: float = 0.0,
     ) -> None:
-        super().__init__(account_id=account_id, matcher=matcher)
+        super().__init__(
+            account_id=account_id,
+            matcher=matcher,
+            throttle=throttle,
+            jitter_radius=jitter_radius,
+            post_delay_variance=post_delay_variance,
+        )
         self.current_screen = initial_screen
         self._connected = False
 

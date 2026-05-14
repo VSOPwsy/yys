@@ -10,7 +10,7 @@
 - ✅ Phase 1：核心抽象层（异常体系 / 日志 / TTL 缓存 / Button / TemplateRepository / TemplateMatcher / OCR / InputBackend 抽象 + NemuIpcBackend / 工厂 / dev_tools 模板提取与匹配调试 / 52 项单元测试）
 - ✅ Phase 2：图导航系统（GameGraph + DSL（subgraph/root_graph/vertex/edge/external + 9 个 action 工厂） / GraphAssembler 含未启用插件 dangling 处理 / PathFinder 含 avoid_risky / avoid_tags / 随机路径 / ScreenRecognizer / Navigator goto + 失败重规划 / dev_tools 三件套（visualizer/screen_inspector/composer） / 52 项新单元测试，全包 104 项通过）
 - ✅ Phase 3：插件 + 线程 + 全局热键（CacheManager 字节预算 / GameplayPlugin + PluginContext（含可中断 sleep / wait_until_resumed） / PluginRegistry 扫盘发现 / PluginWorker 状态机 IDLE→RUNNING→{PAUSED,STOPPED,ERROR} / Scheduler 多账号多插件 + 命令队列 + 调度器线程 / HotkeyController 含 noop 后端 + F9/F10/F12 默认 / FakeBackend 提取到 core / DemoPlugin 5 次循环 + 跨命名空间返回 / 71 项新单元测试，全包 175 项通过）
-- ⬜ Phase 4：首个玩法（一个完整的可跑业务循环）
+- ✅ Phase 4 / v1.0.0：首个玩法 + 拟人化 + 配置系统（core/humanize.py 五件套（disk-uniform jitter / random_delay / human_sleep / weighted_random_path） / core/scheduler/throttle.py 滑动窗口节流 / Scheduler 默认强制"每账号同时一个插件"（AccountBusy 异常） + inter_plugin_gap / GameplayPlugin.handle_unexpected_error 三次重试到 SAFE_VERTEX + save_error_screenshot / LongRunPolicy 看门狗（每日上限 + 休息周期） / core/config.py + config/config.yaml（多账号就绪 dataclass 校验） / graphs/main.py（生产主图，main_menu/popup） / plugins/daily_reward 端到端实现（buttons + graph + steps + plugin + README） / Navigator.goto(humanize=True) / 70 项新单元测试，全包 245 项通过）
 
 ## 3. 强制开发纪律（每次工作必读）
 
@@ -27,28 +27,37 @@
 ```text
 project/
 ├── core/                          # 生产代码核心层。所有抽象基类、运行时框架都在这。
-│   ├── exceptions.py              # 异常树根 BotError 及全部子类（Phase 1/2/3 持续扩充）。
+│   ├── exceptions.py              # 异常树根 BotError 及全部子类（Phase 1-4 持续扩充）。
 │   ├── logging_config.py          # setup_logging / get_logger，彩色 + 按天滚动（Phase 1）。
-│   ├── input_backend/             # Strategy 模式：抽象输入接口 + nemu_backend.py + fake.py（demo/test）+ 工厂。
+│   ├── humanize.py                # Phase 4：disk jitter / 时间扰动 / 加权随机路径。无状态。
+│   ├── config.py                  # Phase 4：YAML → AppConfig dataclass 树，校验后供 main.py 用。
+│   ├── input_backend/             # Strategy 模式：抽象输入接口 + nemu_backend.py + fake.py + 工厂。
 │   ├── vision/                    # 视觉栈：Button、TemplateRepository、TemplateMatcher、OcrEngine。
 │   ├── navigation/                # 图导航：vertex/edge 模型、路径搜索、跨命名空间合并。
 │   ├── scheduler/                 # Phase 3：plugin_base.py / registry.py / worker.py / scheduler.py。
+│   │                              # Phase 4：throttle.py（滑窗节流）/ longrun.py（休息+日上限看门狗）。
 │   ├── hotkey/                    # Phase 3：controller.py（keyboard / noop 后端）。
 │   └── cache/                     # lru.py: TTLCache（计数）；manager.py: CacheManager（字节预算，per account_id）。
 ├── vendor/alas/                   # Alas (LmeSzinc/AzurLaneAutoScript) 的 verbatim 子集。
 │                                  # 详见 vendor/alas/README.md。
 ├── plugins/                       # 每个子目录 = 一个玩法 = 一个 GameplayPlugin 实现。
 │                                  # 自带 graph.py 子图与 main 主图合并。
-├── graphs/                        # 主图（全局界面骨架，main_menu/profile 等）。
+│   ├── _demo/                     # Phase 3 演示插件（fake-backend 友好）。
+│   └── daily_reward/              # Phase 4 参考实现：buttons / graph / steps / plugin / README。
+├── graphs/                        # 主图（全局界面骨架）。
+│   ├── main.py + main_buttons.py  # Phase 4 生产主图（main_menu / popup）。
+│   ├── _demo.py + _demo_actions.py # Phase 2/3 演示用 fake-recognizer 主图（保留以兼容 _demo 插件）。
+├── config/                        # Phase 4：config.yaml 默认配置 + config.fake.yaml 烟雾测试配置。
 ├── templates/                     # 模板图（PNG），按玩法分子目录。
 ├── dev_tools/                     # 开发脚本：vendor 生成、smoke 测试、模板裁剪等。
 │                                  # 禁止被生产代码 import。
-├── tests/                         # 单元/集成测试。
-├── logs/                          # 运行日志（按 account_id 子目录隔离）。
-├── main.py                        # 程序入口。
+├── tests/                         # 单元/集成测试（Phase 4 末尾 245 项）。
+├── logs/                          # 运行日志（按 account_id 子目录隔离；error/ 存崩溃截图）。
+├── main.py                        # Phase 4：config-driven 多账号入口。
 ├── requirements.txt
 ├── .gitignore
-└── CLAUDE.md                      # 本文件。
+├── README.md                      # 用户向 README（安装 / 配置 / 添加新玩法 / FAQ）。
+└── CLAUDE.md                      # 本文件（AI 工作记忆）。
 ```
 
 ## 5. 架构决策（关键设计模式）
@@ -191,8 +200,12 @@ project/
 | `TemplateNotFound` | `VisionError` | `Button.template` 指向的 PNG 不在 disk 上。 |
 | `MatchTimeout` | `VisionError` | `wait_for` 超时；`click(Button)` 一次没找到也抛这个。 |
 | `OcrError` | `VisionError` | PaddleOCR 初始化或调用失败、输入 shape/dtype 不对。 |
-| `NavigationError` | `BotError` | 预留给 Phase 2。 |
-| `PluginError` | `BotError` | 预留给 Phase 3。 |
+| `NavigationError` | `BotError` | 导航层根。子类：`GraphValidationError` / `NoPathFound` / `UnknownVertex` / `CurrentVertexUnknown` / `EdgeExecutionFailed`。 |
+| `PluginError` | `BotError` | 插件/调度层根。Phase 3 子类：`PluginDiscoveryFailed` / `PluginNotRegistered` / `AccountNotRegistered` / `PluginRequirementUnmet` / `WorkerAlreadyRunning`。 |
+| `AccountBusy` | `PluginError` | **Phase 4**：账号已有 plugin RUNNING/PAUSED，又试图启动第二个（`concurrent_plugins=False` 时默认行为）。 |
+| `RecoveryFailed` | `PluginError` | **Phase 4**：`handle_unexpected_error` 三次重试到 SAFE_VERTEX 全失败。当前实现没有真正 raise（worker 直接保持 ERROR），保留给将来的"硬性中止调度"语义。 |
+| `ThrottleTimeout` | `BotError` | **Phase 4**：`Throttle.wait(timeout=...)` 超时。诊断用，正常路径不该触发。 |
+| `ConfigError` | `BotError` | **Phase 4**：`load_config` 失败。文件不存在 / 顶层不是 mapping / 未知键 / 负数 duration / 重复 account id 等。 |
 
 ---
 
@@ -787,6 +800,175 @@ per-account 资源捆绑，**由调用方（如 `main.py`）构造**并传给 `S
 
 `click_xy` / `swipe` / `long_click_xy` / `drag` 都是 no-op（duration<=0 仍然抛 `ValueError`）。`connect/disconnect/is_connected` 是 bool 翻转，没有真 IPC。
 
+**Phase 4 增补**：构造器加了 `throttle` / `jitter_radius` / `post_delay_variance` 三个 keyword-only 形参（默认全 None / 0，保持向后兼容）。`NemuIpcBackend` 同步加了这三个，并在 `click_xy` / `swipe` / `drag` / `long_click_xy` 入口调 `self._acquire_action_slot()` 让节流生效。
+
+---
+
+### core/humanize.py — Phase 4
+
+无状态工具集。所有函数都接受 `rng` 注入点（默认用 module-level `random`），测试可注入 `random.Random(seed)` 做确定性回归。
+
+#### `jitter_point(x, y, radius=8, *, rng=None) -> (int, int)`
+
+把 `(x, y)` 在半径 `radius` 像素的**圆盘内**均匀采样扰动。比 `InputBackend._jitter` 的 randint 方形扰动更"自然"，圆盘均匀避免方向偏差。`radius<=0` 直接返回原值。
+
+#### `random_delay(base, variance=0.3, *, rng=None) -> float`
+
+返回 `base * (1 + uniform[-variance, variance])`，下限 clip 到 0。
+
+**异常**：`ValueError` — `base<0` 或 `variance<0`。
+
+#### `human_sleep(seconds, variance=0.2, *, rng=None, sleep=time.sleep) -> float`
+
+调 `random_delay` 计算实际秒数后调 `sleep(actual)`。**不是 stop-aware**——plugin 内部要可中断睡眠用 `PluginContext.sleep`，这个函数给非 plugin 路径（例如 `InputBackend.click` 的 post_delay 抖动）用。返回实际睡了多少秒。
+
+#### `weighted_random_path(paths, cost_fn, *, bias=1.5, rng=None) -> path`
+
+从 `paths` 列表中按 `1 / cost^bias` 加权抽一条。`bias=0` 退化为均匀；`bias` 越大越偏好低 cost。零 cost 用 `1e-6` 替代避免除零。
+
+**异常**：`ValueError` — paths 为空 / bias<0 / cost_fn 返回负数。
+
+---
+
+### core/scheduler/throttle.py — Phase 4
+
+#### `Throttle(min_interval=0.2, max_actions_per_window=120, window_seconds=60.0, *, clock=time.monotonic, sleep=time.sleep, name="default")`
+
+线程安全的"最小间隔 + 滑动窗口数量上限"两层节流。
+
+**构造异常**：`ValueError` — 任意值为负 / `max_actions_per_window>0` 时 `window_seconds<=0`。
+
+**核心 API**
+- `wait(timeout=None) -> float`：阻塞直到下一次操作允许；记录这次完成。返回实际睡眠的秒数（0 = 立即放行）。`timeout` 设上限后超时抛 `ThrottleTimeout`。**这是 NemuIpcBackend 的 `click_xy` / `swipe` / `drag` / `long_click_xy` 在入口必调的方法**（通过 `_acquire_action_slot()` 间接调），所以两个限流同时管 click + swipe + drag，不会跑两套预算。
+- `reset()` / `total_calls` / `total_wait_seconds` / `actions_in_window()`：自省 / 测试。
+
+**架构位置**：`main.py` 按 `humanize.min_action_interval_ms` 和 `humanize.max_actions_per_minute` 给每个账号造一个 Throttle，注入到 backend。**每账号一个实例**（CLAUDE.md S5），两个账号不共享预算。
+
+---
+
+### core/scheduler/longrun.py — Phase 4
+
+#### `LongRunPolicy(scheduler, *, daily_max_runtime, rest_every, rest_duration, on_daily_cap_reached=None, tick_interval=5.0, clock=time.monotonic, sleep=time.sleep)`
+
+后台看门狗线程。两个职责：
+1. **每日上限**：累计 `daily_max_runtime` 秒后，submit `scheduler.stop_all` 并触发 `on_daily_cap_reached` 回调（main.py 用它跳出主循环）。
+2. **休息周期**：每 `rest_every` 秒 submit `pause_all` → 等 `rest_duration` 秒 → submit `resume_all`。`rest_every=0` 禁用休息周期。
+
+**API**：`start()` / `stop()` / `daily_cap_triggered` (property) / `elapsed` (property)。`start()` 是幂等的。
+
+**异常**：`ValueError` — `daily_max_runtime<=0` / `rest_every<0` / `rest_every>0` 时 `rest_duration<=0` / `tick_interval<=0`。
+
+**注意**：watchdog 用 `scheduler.submit` 提交所有动作，所以执行权落在 dispatcher 线程上——和 hotkey callback 一样。它自己永不直接调 scheduler 的 stop/pause/resume，避免锁竞争。
+
+---
+
+### core/config.py — Phase 4
+
+类型化的 YAML 配置加载器。所有 dataclass `frozen=True`，main.py 拿到后只读传递。
+
+#### `load_config(path) -> AppConfig`
+
+**返回**：`AppConfig(global_=..., accounts=[...])`。
+
+**异常**：`ConfigError` — 文件不存在 / yaml 解析失败 / 顶层不是 mapping / 任意 section 出现未知键（typo 早抛错）/ 负 duration / 重复 account id / `emulator.backend` 不是 `nemu`/`fake` / `hotkeys.backend` 不是 `keyboard`/`noop` / plugin 配置块出现 `enabled`/`params` 以外的键。
+
+#### `AppConfig` 数据形状
+
+```
+AppConfig
+├── global_ (GlobalConfig)
+│   ├── scheduler (SchedulerPolicyConfig)
+│   │   ├── daily_max_runtime_minutes: int = 480
+│   │   ├── rest_every_minutes: int = 90
+│   │   ├── rest_duration_minutes: int = 10
+│   │   ├── inter_plugin_gap_seconds: float = 5.0
+│   │   ├── concurrent_plugins: bool = False
+│   │   └── graceful_stop_timeout_seconds: float = 10.0
+│   ├── humanize (HumanizeConfig)
+│   │   ├── click_jitter_radius: int = 12
+│   │   ├── delay_variance: float = 0.5
+│   │   ├── post_delay_variance: float = 0.3
+│   │   ├── min_action_interval_ms: int = 400
+│   │   └── max_actions_per_minute: int = 60
+│   └── hotkeys (HotkeyConfig)
+│       ├── pause: str = "f9"
+│       ├── stop: str = "f10"
+│       ├── exit: str = "f12"
+│       └── backend: str = "keyboard"  # or "noop"
+└── accounts: List[AccountConfig]
+    └── AccountConfig
+        ├── id: str
+        ├── emulator (EmulatorConfig)
+        │   ├── backend: str = "nemu"  # or "fake"
+        │   ├── mumu_folder: str = "D:/Program Files/Netease/MuMu"
+        │   ├── instance_id: int = 0
+        │   └── display_id: int = 0
+        └── plugins: Dict[str, PluginConfig]
+            └── PluginConfig
+                ├── enabled: bool = True
+                └── params: Mapping[str, Any] = {}
+```
+
+`AccountConfig.enabled_plugin_names` (property) 返回 `enabled=True` 的插件名，排好序，供 main.py 直接 iterate。
+
+---
+
+### Phase 4 对 core/scheduler/scheduler.py 的扩展
+
+`Scheduler.__init__` 加了两个 keyword-only 参数：
+
+- `concurrent_plugins: bool = False` ⭐：**Phase 4 默认 False**——同一账号已有 plugin alive 时 `start_plugin` 抛 `AccountBusy`。原因：Navigator 不是线程安全的（CLAUDE.md §7 Phase 3 caveat）。需要并行多插件时显式传 `True`。
+- `inter_plugin_gap: float = 0.0`：同账号上"上个 plugin 结束 → 下个 plugin 开始"之间的最小秒数。`start_plugin` 在锁外 `time.sleep(gap_wait)`。0 禁用。
+
+`stop_plugin` / `_stop_account_unlocked` 都会更新内部 `_last_finished_at[account_id] = monotonic()`，给 `inter_plugin_gap` 用。
+
+### Phase 4 对 core/scheduler/plugin_base.py 的扩展
+
+`GameplayPlugin` 新增 class vars + 方法：
+
+- `SAFE_VERTEX: str = "main_menu"`：错误恢复时 navigator.goto 的目的地。
+- `MAX_RECOVERY_ATTEMPTS: int = 3`：`recover_to_main` 重试次数。
+- `AUTO_RECOVER_ON_UNEXPECTED_ERROR: bool = True`：worker 在 run() 抛错后是否调 `handle_unexpected_error`。设 False 让 plugin 完全自己管错误路径。
+
+- `save_error_screenshot(ctx, exc, *, log_root=None) -> Optional[Path]`：把当前 backend.screenshot() 存到 `logs/<account>/error/<ts>_<plugin>.png`。所有 IO 错误吞掉返回 None——错误恢复路径绝不能再次抛错让原因模糊。
+- `recover_to_main(ctx) -> bool`：单次尝试 `ctx.navigator.goto(SAFE_VERTEX)`，吞 NavigationError。
+- `handle_unexpected_error(ctx, exc) -> bool`：worker 在 run() 抛错后调。默认实现：截图 + 重试 SAFE_VERTEX 最多 `MAX_RECOVERY_ATTEMPTS` 次。子类 override 时**建议先调 super().save_error_screenshot()** 保住取证。返回是否成功恢复到安全状态——失败时 worker 状态保持 ERROR、scheduler 视为该 plugin 死掉。
+
+### Phase 4 对 core/scheduler/worker.py 的扩展
+
+`PluginWorker._run_lifecycle`：捕获到 run() 抛错后，**`record_error` 之后再判 `AUTO_RECOVER_ON_UNEXPECTED_ERROR` 调 `plugin.handle_unexpected_error`**。恢复成功 / 失败都不改 worker.status（保持 ERROR）。恢复路径自身抛错只 log，主错误仍是 last_error。
+
+---
+
+### graphs/main.py — Phase 4 生产主图
+
+#### `build_main_graph() -> GameGraph`
+
+定义两个 vertex：`main_menu`（家的锚点）+ `popup`（通用弹窗，识别 X 按钮）。两条 edge：
+- `popup → main_menu`：`click_button(CLOSE_POPUP_BTN)`，tag `recovery`，让 PathFinder 可以用 `avoid_tags=["recovery"]` 排除"必须先关弹窗"这种路径作为常规选项。
+- `main_menu → daily_reward.sign_in_panel`：`click_button(SIGN_IN_ENTRY_BTN)`，用 `external("daily_reward.sign_in_panel")` 跨命名空间。
+
+`graphs/main_buttons.py` 持有四个公共 Button：`MAIN_MENU_ANCHOR` / `SIGN_IN_ENTRY_BTN` / `HOME_RETURN_BTN` / `CLOSE_POPUP_BTN`。
+
+> 真机跑前必须用 `dev_tools/template_extractor.py` 把四张 PNG 抠到 `templates/main/`。否则 `core.exceptions.TemplateNotFound`。
+
+### plugins/daily_reward/ — Phase 4 参考实现
+
+文件清单与职责：
+
+| 文件 | 职责 |
+| --- | --- |
+| `__init__.py` | 仅 re-export `DailyRewardPlugin`。 |
+| `buttons.py` | 5 个 Button + 1 个 OCR 区域常量（`REWARD_COUNT_REGION`）。 |
+| `graph.py` | `build_subgraph()` 注册 `daily_reward.sign_in_panel` 顶点 + 跨命名空间返回 edge。 |
+| `steps.py` | 6 个步骤函数，每个接受 `ctx`：`open_sign_in_panel` / `is_already_claimed` / `claim_today` / `read_reward_count` / `confirm_reward_popup` / `return_to_main_menu`。 |
+| `plugin.py` | `DailyRewardPlugin(GameplayPlugin)`。`requires_vertices=["main_menu", "daily_reward.sign_in_panel"]`。Override `handle_unexpected_error` 先尝试关闭签到面板再走默认 main_menu 恢复。 |
+| `README.md` | 用户向：流程图 + 模板清单（要抠哪 9 张 PNG） + OCR 配置 + 联调步骤。 |
+
+`read_reward_count` 用 `ctx.ocr.recognize` + 正则 `[x×X]?\s*(\d{1,6})` 抽数字。`ctx.ocr is None` 时直接 return None（OCR 没装也能跑，只是不写奖励数到日志）。
+
+---
+
 ## 7. 已知问题与陷阱
 
 - **DLL 截图格式**：返回 BGRA 且上下颠倒。需 `cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)` + `cv2.flip(img, 0, dst=img)`。错过这一步保存的 PNG 颜色异常、上下镜像。
@@ -821,26 +1003,174 @@ per-account 资源捆绑，**由调用方（如 `main.py`）构造**并传给 `S
 - **`PluginContext.sleep` 是 stop-aware，不是 pause-aware**：pause 时 `sleep` 照样计满 seconds（这是有意——pause 是"暂停业务循环"，不是"无限定阻塞"）。要在 pause 期间挂起，用 `wait_until_resumed(poll=0.2)`。
 - **`PluginRegistry.discover` 走 `pkgutil.iter_modules`**：只发现 `plugins/<dir>` 是 Python 包（有 `__init__.py`）的子目录。子目录名以 `__` 开头会被跳过（dunder 保留），但**单下划线开头是 OK 的**（`_demo` 能被发现）。如果新 plugin 不被识别，先检查它有没有 `__init__.py` 并且重新 import。
 
-## 8. 下一步
+### Phase 4 引入
 
-**Phase 4 目标**：首个真玩法（端到端可跑的业务循环）。
+- **"每账号同时一个 plugin"是 `Scheduler` 的默认行为**，不再是隐式约束。`Scheduler(concurrent_plugins=False)` 是默认；试图启动第二个 plugin 会抛 `AccountBusy`。`test_multi_plugin_per_account_blocked_by_default` 是回归保险。要并行多 plugin 时必须显式 `concurrent_plugins=True` 并自己审计 Navigator 的并发使用。
+- **`Throttle` 节流是 NemuIpcBackend 的 primitives 入口**（`click_xy` / `swipe` / `drag` / `long_click_xy`），不在高层 `click()` 里。原因：避免 click()→click_xy() 双计数。**plugin 调 `find()` / `wait_for()` 不会被节流**（只读不计数）；`is_visible` 同理。
+- **`_jitter` 不再是 staticmethod**：Phase 4 改成实例方法，可以读 `self._jitter_radius`。调用方一直是 `self._jitter(x, y)`，兼容。但任何 `InputBackend._jitter(x, y)` 这种类级调用（如果以前真有过）会挂。
+- **`InputBackend.click()` 的 post_delay 会被 `post_delay_variance` 扰动**：`humanize.human_sleep(delay, variance=post_delay_variance)`。`variance=0`（默认）= 完全确定性；config 默认 0.3 = ±30% 扰动。**单测使用 `_StubBackend(account_id=...)` 不传 throttle / variance，所以测试不会被扰动影响**。
+- **`save_error_screenshot` 用 `logs/<account>/error/<ts>_<plugin>.png`**：每次错误一张 PNG，**不会复用文件名**。日志目录别忘了加进 `.gitignore`（已经在）。`cv2.imwrite` 失败 / 目录创建失败 / backend.screenshot 抛错都返回 None 不抛——错误恢复绝对不能再抛。
+- **`LongRunPolicy` 用 `scheduler.submit`**：所有 pause/resume/stop 通过命令队列。**不要在 watchdog 里直接调 scheduler.stop_all()**，那会和 hotkey 抢锁；而且 watchdog 线程不应承担 worker join 的耗时。
+- **`config.yaml` 的 `accounts` 必须是 list**：哪怕只一个账号也必须 `accounts: [...]`。`AppConfig.accounts` 是 `List[AccountConfig]`，main.py 直接迭代。这是多账号就绪性的硬约束（CLAUDE.md §5）。
+- **配置里 `concurrent_plugins: false` 是默认且推荐**：把它改成 `true` 之前去 review 你的 `plugins/<*>` 是否会共享 Navigator——daily_reward 不会（每账号同时只跑它一个），但未来如果有"自动战斗+捡狗粮"这种长 plugin 和"领日常奖励"短 plugin 想并行，需要先给 Navigator 加锁或者把 Navigator 也按 plugin 区分构造。
+- **`inter_plugin_gap` 阻塞 `start_plugin` 的调用线程**：默认是 main.py 的主线程。如果改 hotkey 让操作员手动启动 plugin，gap 会阻塞 dispatcher 线程几秒。可接受（dispatcher 是单线程的，反正你不想让人按一下 F 键瞬间起两个）。
+- **`graphs/_demo.py` + `graphs/_demo_actions.py` 仍保留**：给 `plugins/_demo` 用，给 fake-backend 烟雾测试用。不要在新插件 / 新生产代码里 import 它们。生产路径走 `graphs/main.py`。
+- **`paddleocr` 在 daily_reward 仍是可选**：`steps.read_reward_count` 在 `ctx.ocr is None` 时直接 return None。**不影响签到本身**——签到由 click 完成，OCR 只是写日志记数。
 
-重点关注：
-1. **挑一个简单循环作为试点**——例如"每日委托：进入委托界面 → 一键收 → 一键派 → 回主界面"。要求：完全靠图导航 + 模板匹配能跑通，**不依赖 OCR**（OCR 留给更复杂的玩法）。
-2. `plugins/<name>/buttons.py`：把所有需要点的按钮、所有需要识别的界面 anchor 全部定义出来。模板用 `dev_tools/template_extractor.py` + `dev_tools/graph_composer.py` 录。
-3. `plugins/<name>/graph.py`：用 DSL 构建子图，**必须**和主图 vertex 用 `external(...)` 连起来，避免命名空间漂移成 dangling edge。
-4. `plugins/<name>/<name>_plugin.py`：实现 `GameplayPlugin`。`requires_vertices` 写真依赖；`run()` 是真业务循环（不是 demo 那样的来回切屏），每个 navigator 调用前查 `should_stop()`，每个长 `sleep` 用 `ctx.sleep` 而非 `time.sleep`。
-5. `graphs/main.py`：把 Phase 2 的 `graphs/_demo.py` 升级成真主图——`main_menu` / `profile` / `shop` / `settings` 等真界面，每个 vertex 配真 `Button` recognizer + 真模板。**Phase 4 之后 `graphs/_demo.py` 可以删，Phase 2 的"假 backend"流程也可以退役**。
-6. **真 backend 联调**：把 `main.py` 里的 `FakeBackend` 换成 `get_input_backend(..., "nemu", mumu_folder=...)`，验证 demo 之外的真插件能在 MuMu 上跑起来。先用 `dev_tools/screen_inspector.py` 校准识别再上 plugin。
-7. **多账号试运行**：在 config 里注册第二个 `(account_id, instance_id)`，两个 nemu 实例同时跑一遍——验证 §S5 多账号原则没漏。
+## 9. 如何贡献新玩法
 
-待解决的设计问题（Phase 3 留下来的）：
-- **Navigator 并发**：同一账号上同时跑两个 plugin 会让它们共享 Navigator。要么给 Navigator 加锁（实现简单），要么 Scheduler 强制"每账号同时一个 plugin"（语义清楚但限死扩展性）。Phase 4 选其一。
-- **多账号 OCR 串行**：当前 `OcrEngine` 单例 + RLock，多账号同时 OCR 会排队。等出现"OCR 卡死多账号"再加引擎池。
-- **`stop_plugin` 不强杀**：plugin 若忽略 `should_stop()` 会泄露线程。给 plugin 写指南或自动检测"长时间不查 should_stop"。
-- **配置外置**：目前 `main.py` 的 `_load_config` 是硬编码列表，Phase 4 要换成 YAML（accounts、enabled_plugins、热键自定义、cache 上限），让用户改配置不动代码。
+按这个清单走最不容易踩坑。整个流程参考 `plugins/daily_reward/` 的实现。
 
-环境层面：
-- `keyboard==0.13.5` 已装但**Windows 下非管理员场景会自动降级 noop 并 warning**，不影响开发。CI 上用 `backend="noop"` 通过 `trigger()` 跑测试。
-- Phase 4 开干前不需要新装包；如果决定接 OCR，再装 `paddleocr==2.7.3`。
-- `dev_tools/graph_composer.py` 在 Phase 4 录新插件图时是主力。每录完一个 vertex / edge 立即在画面上拿 `screen_inspector.py` 校准。
+### 步骤 1：分支 + 目录
+
+```powershell
+git checkout -b feature/<plugin_name>
+mkdir plugins/<plugin_name>
+mkdir templates/<plugin_name>
+```
+
+每个 plugin 一个 git 分支，开发完合并回 main 并打 tag（feature 分支不强制保留）。
+
+### 步骤 2：在真模拟器上抠模板 + 录图
+
+1. 启动游戏到玩法所在界面。
+2. 用 `dev_tools/template_extractor.py` 抠出**界面识别锚点**（每个 vertex 一个）+ **可点击按钮**：
+   ```powershell
+   D:\anaconda3\envs\yys\python.exe dev_tools/template_extractor.py --mumu "D:/Program Files/Netease/MuMu"
+   ```
+   按 `S` 截屏 → 框选 → `C` 裁剪并保存到 `<plugin_name>/<button_name>`。**框紧**，越是小而独特的元素匹配越稳。
+3. （可选）用 `dev_tools/graph_composer.py` 在真模拟器上录一遍 vertex/edge 流程，输出 Python 草稿到 `dev_tools/composer_output/draft_*.py`。再手动整理到 `plugins/<plugin_name>/graph.py`。
+
+### 步骤 3：写 `buttons.py`
+
+所有 Button 集中在一个文件。命名清晰：`<TYPE>_BTN`（如 `CLAIM_TODAY_BTN`）/ `<TYPE>_ANCHOR`（如 `SIGN_IN_PANEL_ANCHOR`）。`post_delay` 写够：点击后游戏有动画 / 加载，post_delay 太短会导致下一次识别看到过渡帧。daily_reward 经验：1.0 秒是稳的下限。
+
+### 步骤 4：写 `graph.py`
+
+```python
+from core.navigation import GameGraph, edge, external, subgraph, vertex
+from core.navigation.builder import click_button
+from plugins.<plugin_name>.buttons import ...
+
+def build_subgraph() -> GameGraph:
+    with subgraph("<plugin_name>") as g:
+        vertex("entry", name="...", recognizer=ANCHOR, dwell_time=800)
+        # 返回根命名空间用 external("main_menu") — 不写就会变成 <plugin>.main_menu 死边
+        edge("entry", external("main_menu"), action=click_button(CLOSE_BTN), cost=1.0)
+    return g
+```
+
+主图侧的入口边（main_menu → 你的 vertex）写在 `graphs/main.py`，用 `external("<plugin_name>.entry")`。
+
+### 步骤 5：写 `steps.py`
+
+把业务过程切成 6-10 个小函数，每个接受 `(ctx)`。例：`open_panel(ctx)` / `pick_target(ctx, idx)` / `confirm(ctx)`。好处：可以单独 mock 单测，编排逻辑全在 `plugin.run()` 里能一目了然。**步骤函数里调 `ctx.navigator.goto(..., humanize=True)` 而不是 `mode="random"`** —— 一致用 `humanize=True` 关键字。
+
+### 步骤 6：写 `plugin.py`
+
+```python
+class MyPlugin(GameplayPlugin):
+    name = "<plugin_name>"
+    display_name = "..."
+    requires_vertices = ["main_menu", "<plugin_name>.entry", ...]
+    SAFE_VERTEX = "main_menu"  # 错误恢复目的地，默认就是这个
+
+    @classmethod
+    def build_subgraph(cls):
+        from plugins.<plugin_name>.graph import build_subgraph
+        return build_subgraph()
+
+    def setup(self, ctx): ...
+    def run(self, ctx):
+        if ctx.should_stop(): return
+        steps.open_panel(ctx)
+        # 每个 step 前查 should_stop
+    def teardown(self, ctx): ...
+```
+
+**纪律**：
+- 每个 step 之前必须 `if ctx.should_stop(): return`。
+- 长 sleep 用 `ctx.sleep(seconds)`（可中断）而不是 `time.sleep`。
+- 业务 try/except 抛预期错误（如 `MatchTimeout`）是 OK 的，soft-fail 比 raise 友好；硬错误让它冒出去走 worker 的 `handle_unexpected_error`。
+
+### 步骤 7：写测试
+
+至少：
+- `tests/test_<plugin_name>_plugin.py`：mock backend / navigator / cache，跑 `setup → run → teardown` 验证步骤被调用、关键变量正确。
+- 如果有复杂逻辑（OCR 解析、状态机），独立测一个 `tests/test_<plugin_name>_steps.py`。
+
+参考 `tests/test_daily_reward_plugin.py`。
+
+### 步骤 8：写 README
+
+`plugins/<plugin_name>/README.md`。至少包含：
+- 流程图（文字 + ASCII 都可）。
+- `requires_vertices` 列表。
+- **模板清单表格**：逻辑名 / 用途 / 抓取建议。这是别人复刻你这个 plugin 时唯一需要看的清单。
+- OCR 是否需要 / 如何配置。
+- 联调步骤（dev_tools/screen_inspector.py 校准 → main.py 跑）。
+
+### 步骤 9：注册到 config.yaml
+
+```yaml
+accounts:
+  - id: main
+    plugins:
+      <plugin_name>:
+        enabled: true
+        params: {}
+```
+
+### 步骤 10：合并 + 打 tag
+
+```powershell
+D:\anaconda3\envs\yys\python.exe -m pytest tests/ -q  # 必须全过
+git add .
+git commit -m "feat(<plugin_name>): ..."
+git checkout main
+git merge --no-ff feature/<plugin_name>
+git tag plugin-<plugin_name>-v1
+```
+
+**Phase 4 / v1.0.0 已完成 ✅**。daily_reward 是参考实现；接下来按 §9 的清单加更多玩法。下面是后续 v1.x 可以考虑的方向：
+
+### v1.1 候选：Navigator 并发安全
+
+最该处理的遗留项。两条路：
+
+1. **给 Navigator 加 RLock**（实现简单，~10 行）。`goto` / `detect_current` / `is_at` 加锁。允许 `concurrent_plugins=true` 真正可用。代价：plugin 之间会互相阻塞 navigator 调用，串行成本，但仅限同一账号。
+2. **Plugin 间用 Navigator 池**：Scheduler 给每个 (account, plugin) 一个独立 Navigator。代价：多份 Navigator 状态 + 启动多份 `ScreenRecognizer` 缓存，内存翻倍。但完全解耦。
+
+第 1 条更性价比。决定后写在这里，落地完删 `Scheduler(concurrent_plugins=False)` 的默认强制约束（仍保留 opt-out）。
+
+### v1.2 候选：多账号 OCR 池
+
+`OcrEngine.instance()` 是进程单例 + RLock 串行。两个账号同时 OCR 一帧反应时间会翻倍。简单做法：把 RLock 改成"每实例 N 个 worker 引擎"的队列，N=账号数。每个账号拿到的引擎是固定的，不会跨实例排队。前置：先有第二个用 OCR 的插件，量化串行确实是瓶颈再做。
+
+### v1.3 候选：长跑统计 + 报表
+
+`LongRunPolicy` 已经追踪 elapsed。再加：
+- 每个 plugin 启停时间戳 + 错误次数 → 落到 `logs/<account>/summary.json`。
+- 每日统计：当天跑了什么 plugin / 跑了多久 / 错误率 / OCR 抽到的奖励数。
+- 可视化（matplotlib 出报表 PNG，或 web 小页面）。
+
+### v1.4 候选：Plugin 间依赖声明
+
+目前 `requires_vertices` 只是顶点存在性。如果 plugin A 必须在 plugin B 之前跑（"先签到再领奖励"），需要 `requires_plugin_completed` 之类的声明。`Scheduler.start_all` 据此排序。
+
+### v1.5 候选：自动检测 plugin 不查 should_stop
+
+`PluginWorker.stop()` 超时把线程留 daemonic 是潜在 bug 源。可以在 `PluginContext` 里给 `should_stop` 加一个"最近调用时间戳"，watchdog 周期性检查"最近 30 秒没被查过"的 plugin 并给 log warning 提示作者。
+
+### 设计上需要审慎的（不一定要做）
+
+- **Hot-reload plugin**：跑着改 plugin 代码，不重启 main.py。技术上 importlib.reload 能做，但保留 worker / cache / navigator 引用一致性麻烦，得不偿失。建议保持"改完代码重启 main.py"。
+- **跨进程多账号**：当前所有账号在一个 Python 进程里。如果哪天 OCR 池化也不够、CPU 真的撑不住，再考虑 `multiprocessing.Process` per account。会需要把 `Scheduler` 跨进程化，工程量大。
+
+---
+
+环境层面（v1.0.0 当前的）：
+- `keyboard==0.13.5` 在**Windows 下非管理员场景会自动降级 noop 并 warning**，不影响开发。
+- `PyYAML==6.0.3` Phase 4 新增依赖。
+- `paddleocr==2.7.3` 仍是可选。
+- `dev_tools/graph_composer.py` 录新插件图时是主力。每录完一个 vertex / edge 立即在画面上拿 `screen_inspector.py` 校准。

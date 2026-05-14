@@ -275,6 +275,31 @@ class PluginWorker:
             except BaseException as exc:  # noqa: BLE001
                 run_error = exc
                 self._record_error(exc, where="run")
+                # Phase 4 recovery: try to bring the UI back to a known
+                # safe vertex so the next plugin (or a manual operator)
+                # doesn't inherit a stuck modal. Swallow recovery's own
+                # exceptions — the original run() error is the primary
+                # finding and stays in `last_error`.
+                if getattr(self._plugin, "AUTO_RECOVER_ON_UNEXPECTED_ERROR", False):
+                    try:
+                        recovered = self._plugin.handle_unexpected_error(ctx, exc)
+                    except Exception:  # noqa: BLE001
+                        log.exception(
+                            "%s: handle_unexpected_error itself raised; "
+                            "keeping the original run() error as primary",
+                            self._thread_name,
+                        )
+                        recovered = False
+                    if recovered:
+                        log.info(
+                            "%s: post-error recovery returned to safe vertex",
+                            self._thread_name,
+                        )
+                    else:
+                        log.warning(
+                            "%s: post-error recovery failed; plugin will stay in ERROR",
+                            self._thread_name,
+                        )
                 return
 
             log.info("%s: run() returned normally", self._thread_name)

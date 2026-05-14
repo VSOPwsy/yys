@@ -15,17 +15,21 @@ Public re-exports below let callers do
 ``from core.scheduler import GameplayPlugin, Scheduler``.
 """
 
+from core.scheduler.longrun import LongRunPolicy
 from core.scheduler.plugin_base import GameplayPlugin, PluginContext
 from core.scheduler.registry import PluginRegistry
 from core.scheduler.scheduler import AccountRuntime, Scheduler
+from core.scheduler.throttle import Throttle
 from core.scheduler.worker import PluginWorker, WorkerStatus
 
 __all__ = [
     "AccountRuntime",
     "GameplayPlugin",
+    "LongRunPolicy",
     "PluginContext",
     "PluginRegistry",
     "PluginWorker",
     "Scheduler",
+    "Throttle",
     "WorkerStatus",
 ]

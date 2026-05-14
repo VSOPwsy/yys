@@ -1,0 +1,36 @@
+# Headless / test config — uses FakeBackend so the project boots without
+# a real emulator. Useful for verifying main.py wiring in CI or on a dev
+# machine without MuMu installed.
+
+global:
+  scheduler:
+    daily_max_runtime_minutes: 1   # exit fast for smoke tests
+    rest_every_minutes: 60         # no rest in the 1-min cap window
+    rest_duration_minutes: 1
+    inter_plugin_gap_seconds: 0
+    concurrent_plugins: false
+    graceful_stop_timeout_seconds: 5
+  humanize:
+    click_jitter_radius: 4
+    delay_variance: 0.1
+    post_delay_variance: 0.0
+    min_action_interval_ms: 50
+    max_actions_per_minute: 0      # disabled in fake mode
+  hotkeys:
+    pause: f9
+    stop: f10
+    exit: f12
+    backend: noop                  # no OS hooks (CI-friendly)
+
+accounts:
+  - id: fake_main
+    emulator:
+      backend: fake
+      mumu_folder: dummy           # ignored by fake backend
+      instance_id: 0
+    # No plugins enabled by default — the new graphs/main.py uses real
+    # Button recognizers that don't match FakeBackend's `_ScreenFrame`,
+    # so a runnable plugin loop would need a different root graph (kept
+    # at graphs/_demo.py for that purpose, not wired in by main.py).
+    # This file is for verifying main.py boot/shutdown wiring only.
+    plugins: {}

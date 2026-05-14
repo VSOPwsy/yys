@@ -117,6 +117,7 @@ class Navigator:
         target_id: str,
         *,
         mode: str = "shortest",
+        humanize: bool = False,
         avoid_risky: bool = False,
         avoid_tags: Optional[Iterable[str]] = None,
         max_path_replans: int = 1,
@@ -129,6 +130,10 @@ class Navigator:
                 resolved via the root namespace.
             mode: "shortest" (default) or "random". Random mode samples among
                 multiple viable paths so the bot doesn't look mechanical.
+            humanize: Convenience for the Phase 4 humanize profile. When
+                True and `mode == "shortest"`, switches to "random". Plugins
+                that want pseudo-human behavior at every step should pass
+                `humanize=True` instead of remembering to set the mode.
             avoid_risky / avoid_tags: Forwarded to `PathFinder`.
             max_path_replans: How many times we recompute the route after
                 we end up on an unexpected vertex. Default 1 — one missed
@@ -149,6 +154,12 @@ class Navigator:
         """
         if mode not in ("shortest", "random"):
             raise ValueError(f"mode must be 'shortest' or 'random', got {mode!r}")
+        # `humanize=True` is the user-facing knob from Phase 4 plugins
+        # ("be less predictable"). It maps to "random" mode internally.
+        # We don't make this the default because tests + simple navigation
+        # cases really do want deterministic shortest paths.
+        if humanize and mode == "shortest":
+            mode = "random"
 
         resolved_target = self._resolve_vertex_id(target_id)
         current = self.detect_current()

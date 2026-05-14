@@ -1,0 +1,78 @@
+# yys_script configuration.
+#
+# Loader: core/config.py
+# Schema docs: see the dataclass definitions in that module.
+#
+# Layout:
+#   global:           settings shared across every account
+#     scheduler:        long-run policy (rest cycles, runtime cap)
+#     humanize:         randomness / throttle parameters
+#     hotkeys:          OS-level keyboard bindings
+#   accounts:           list of accounts (even with a single account, use a list)
+#     - id:             stable identifier; namespaces logs + caches
+#       emulator:       backend + MuMu instance config
+#       plugins:        per-plugin enable flag + params
+
+global:
+  scheduler:
+    # Hard cap on wall-clock runtime per day (minutes). When exceeded,
+    # the scheduler stops every worker and exits the main loop.
+    daily_max_runtime_minutes: 480
+    # Auto-rest: every N minutes of run-time, pause everything for...
+    rest_every_minutes: 90
+    # ...this many minutes. During rest, F9 resume is ignored.
+    rest_duration_minutes: 10
+    # Seconds between when one plugin finishes and the next on the same
+    # account may start (prevents "plugin A ended at T, B started at T+0.1").
+    inter_plugin_gap_seconds: 5.0
+    # Phase 4 default: one plugin per account at a time. Flip to true
+    # only if you've audited Navigator concurrency for your plugins.
+    concurrent_plugins: false
+    # Seconds to wait for graceful worker shutdown before logging a warning.
+    graceful_stop_timeout_seconds: 10.0
+
+  humanize:
+    # Disk-uniform pixel jitter applied to every tap. Conservative profile.
+    click_jitter_radius: 12
+    # Click post-delay is fuzzed by ±this fraction (uniform).
+    post_delay_variance: 0.3
+    # Generic delay fuzz factor — used inside core.humanize.random_delay.
+    delay_variance: 0.5
+    # Min milliseconds between any two actions on one account.
+    min_action_interval_ms: 400
+    # Sliding-window cap on actions per 60s. 60 ≈ one action per second.
+    max_actions_per_minute: 60
+
+  hotkeys:
+    pause: f9
+    stop: f10
+    exit: f12
+    # 'keyboard' uses the `keyboard` pip package (Windows: needs admin to
+    # be reliable). 'noop' disables OS hooks — useful in CI / headless.
+    backend: keyboard
+
+accounts:
+  # NOTE: even with a single account, this is a list so adding a second
+  # account ("alt1") is a pure additive change — no main.py rewrite.
+  - id: main
+    emulator:
+      backend: nemu
+      # The MuMu 12 install root (folder containing shell/, nx_device/,
+      # vms/...). Per CLAUDE.md S6, NOT a subdirectory.
+      mumu_folder: D:/Program Files/Netease/MuMu
+      instance_id: 0
+      display_id: 0
+    plugins:
+      daily_reward:
+        enabled: true
+        params: {}
+
+  # # Example second-account block — uncomment + adjust to add a multi-account run.
+  # - id: alt1
+  #   emulator:
+  #     backend: nemu
+  #     mumu_folder: D:/Program Files/Netease/MuMu
+  #     instance_id: 1
+  #   plugins:
+  #     daily_reward:
+  #       enabled: true

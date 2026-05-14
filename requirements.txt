@@ -16,6 +16,9 @@ paddleocr==2.7.3
 # Global hotkeys (Phase 3)
 keyboard==0.13.5
 
+# YAML config (Phase 4)
+PyYAML==6.0.3
+
 # Dev / tests
 pytest==9.0.3
 # Used only by dev_tools/graph_visualizer.py — production runtime does not import it.
