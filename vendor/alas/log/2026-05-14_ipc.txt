@@ -1,0 +1,10 @@
+═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                                         START                                                         
+═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+2026-05-14 10:54:41.111 | INFO | NemuIpcImpl init, nemu_folder=D:\Program Files\Netease\MuMu, ipc_dll=D:\Program       
+Files\Netease\MuMu\nx_device\12.0\shell\sdk\external_renderer_ipc.dll, instance_id=0, display_id=0                     
+═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+                                                         START                                                         
+═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+2026-05-14 10:56:03.669 | INFO | NemuIpcImpl init, nemu_folder=D:\Program Files\Netease\MuMu, ipc_dll=D:\Program       
+Files\Netease\MuMu\nx_device\12.0\shell\sdk\external_renderer_ipc.dll, instance_id=0, display_id=0                     

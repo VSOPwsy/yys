@@ -1,0 +1,13 @@
+# Core runtime
+numpy
+opencv-python
+pillow
+
+# Navigation graph
+networkx
+
+# OCR (stateless singleton, see CLAUDE.md §5)
+paddleocr
+
+# Global hotkeys
+keyboard

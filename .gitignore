@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & runtime artifacts
+logs/
+*.log
+*.log.*
+
+# Cache & temp
+.cache/
+.tmp/
+*.tmp
+*.bak
+*.pid
+
+# Template authoring scratch (final templates live in templates/ and ARE committed)
+templates/_scratch/
+templates/_raw/
+
+# Smoke-test outputs
+dev_tools/*.png
+dev_tools/_out/
+
+# Project-local temp clones (Alas source is pulled here during vendoring)
+_tmp_alas/
+_tmp_clone/
+.conda_create.log
+
+# Per-account state
+accounts/*/cache/
+accounts/*/logs/
+accounts/*/state.json
+
+# OS
+desktop.ini
