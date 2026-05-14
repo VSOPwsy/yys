@@ -1,13 +1,20 @@
+# Pinned for Phase 1. Versions are what's installed in the `yys` conda env.
+# Loosen the pin to `>=` once we have a CI matrix.
+
 # Core runtime
-numpy
-opencv-python
-pillow
+numpy==2.2.6
+opencv-python==4.13.0.92
+pillow==12.2.0
 
-# Navigation graph
-networkx
+# Navigation graph (Phase 2 — install before merging Phase 2)
+networkx==3.3
 
-# OCR (stateless singleton, see CLAUDE.md §5)
-paddleocr
+# OCR (stateless singleton, CLAUDE.md S5). Lazy-imported in core/vision/ocr.py
+# so Phase 1 can run without it; install when you need OCR.
+paddleocr==2.7.3
 
-# Global hotkeys
-keyboard
+# Global hotkeys (Phase 3)
+keyboard==0.13.5
+
+# Dev / tests
+pytest==9.0.3
