@@ -67,8 +67,8 @@ def build_main_graph() -> GameGraph:
         # because main owns "main_menu" — the plugin only owns its own
         # vertices and can't add edges originating from main's territory.
         edge(
-            "main_menu", "_demo.entry",
-            action=demo_navigate("_demo.entry"),
+            "main_menu", "_demo.demo_screen_1",
+            action=demo_navigate("_demo.demo_screen_1"),
             cost=1.2,
         )
 
