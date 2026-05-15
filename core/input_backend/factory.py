@@ -58,6 +58,7 @@ def get_input_backend(
         throttle = kwargs.pop("throttle", None)
         jitter_radius = kwargs.pop("jitter_radius", None)
         post_delay_variance = float(kwargs.pop("post_delay_variance", 0.0))  # type: ignore[arg-type]
+        bbox_margin = float(kwargs.pop("bbox_margin", 0.1))  # type: ignore[arg-type]
         if kwargs:
             raise BackendNotAvailable(
                 f"nemu backend got unexpected kwargs: {sorted(kwargs)}"
@@ -71,6 +72,7 @@ def get_input_backend(
             throttle=throttle,  # type: ignore[arg-type]
             jitter_radius=jitter_radius,  # type: ignore[arg-type]
             post_delay_variance=post_delay_variance,
+            bbox_margin=bbox_margin,
         )
 
     raise BackendNotAvailable(

@@ -51,6 +51,44 @@ T = TypeVar("T")
 # --------------------------------------------------------------------------- #
 # Coordinate jitter
 # --------------------------------------------------------------------------- #
+def random_point_in_rect(
+    region: Tuple[int, int, int, int],
+    *,
+    rng: Optional[random.Random] = None,
+) -> Tuple[int, int]:
+    """Return a uniformly random ``(x, y)`` inside the inclusive rect.
+
+    Use this for "click hotspot" regions that have no visual feature to
+    template — e.g. an invisible expand area in the corner of a screen.
+    The whole rect IS the humanization range: the backend's per-call
+    ``_jitter`` (±3 px or so) still stacks on top, which is fine — the
+    rect picks the macro position, the backend jitter adds micro noise.
+
+    Args:
+        region: ``(x1, y1, x2, y2)`` ADB coords. Inclusive on both ends.
+            ``x1 == x2`` or ``y1 == y2`` is allowed (collapses to a line
+            or a point — caller's responsibility to pass a meaningful
+            rect).
+        rng: Injection point. Defaults to module `random`.
+
+    Returns:
+        Integer ``(x, y)`` with ``x1 <= x <= x2`` and ``y1 <= y <= y2``.
+
+    Raises:
+        ValueError: `region` is not a 4-tuple or has ``x1 > x2`` /
+            ``y1 > y2`` (caller likely swapped corners).
+    """
+    if len(region) != 4:
+        raise ValueError(f"region must be (x1, y1, x2, y2), got {region!r}")
+    x1, y1, x2, y2 = region
+    if x1 > x2 or y1 > y2:
+        raise ValueError(
+            f"region has inverted corners (x1>x2 or y1>y2): {region!r}"
+        )
+    rng = rng or random
+    return rng.randint(x1, x2), rng.randint(y1, y2)
+
+
 def jitter_point(
     x: int,
     y: int,
@@ -211,5 +249,6 @@ __all__ = [
     "human_sleep",
     "jitter_point",
     "random_delay",
+    "random_point_in_rect",
     "weighted_random_path",
 ]

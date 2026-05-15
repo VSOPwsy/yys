@@ -52,6 +52,7 @@ class InputBackend(abc.ABC):
         throttle: Optional["Throttle"] = None,
         jitter_radius: Optional[int] = None,
         post_delay_variance: float = 0.0,
+        bbox_margin: float = 0.1,
     ) -> None:
         """Store per-account identity. Subclasses must call `super().__init__()`.
 
@@ -66,19 +67,33 @@ class InputBackend(abc.ABC):
                 call (`click`, `swipe`, `drag`, `long_click_xy`). None
                 disables rate-limiting (Phase 1-3 behavior; tests pass None
                 so they don't pace themselves to death).
-            jitter_radius: Pixel radius applied by `_jitter()` when
-                `randomize=True`. None falls back to the legacy 3px square
-                jitter; supplying a number enables disk-uniform jitter via
-                `core.humanize.jitter_point` and is what Phase 4 conservative
-                profiles use (8-12px).
+            jitter_radius: Behaves as a humanization on/off switch plus
+                the disk-jitter radius for raw ``(x, y)`` clicks (where
+                no bbox is known). ``None`` or ``0`` disables humanization
+                entirely — Button clicks land exactly on match center,
+                raw clicks use the 3px legacy ``randint`` fallback. Any
+                positive value enables both:
+                  * Button click path -> `_jitter_in_button` samples
+                    uniformly inside the **full matched bbox** minus
+                    ``bbox_margin`` inset (this radius value does NOT
+                    cap the bbox spread anymore — was the pre-2026-05
+                    behavior; raise ``bbox_margin`` instead if you need
+                    tighter clicks on huge buttons).
+                  * Raw (x, y) path -> disk-uniform jitter of this radius
+                    via `core.humanize.jitter_point`.
             post_delay_variance: Fraction of `Button.post_delay` to fuzz on
                 each click. 0 disables fuzzing (Phase 1-3 behavior). 0.3
                 yields a uniformly random delay in
                 `[post_delay*0.7, post_delay*1.3]`.
+            bbox_margin: Fraction of each side to inset when sampling a
+                random click inside a Button's matched bbox. ``0.1``
+                samples the inner 90% (5% inset per side). ``0`` samples
+                anywhere in the bbox. Must be in ``[0, 0.5)``.
 
         Raises:
-            ValueError: `account_id` is empty, `jitter_radius < 0`, or
-                `post_delay_variance < 0`.
+            ValueError: `account_id` is empty, `jitter_radius < 0`,
+                `post_delay_variance < 0`, or `bbox_margin` not in
+                ``[0, 0.5)``.
         """
         if not account_id:
             raise ValueError("account_id must be a non-empty string")
@@ -88,11 +103,16 @@ class InputBackend(abc.ABC):
             raise ValueError(
                 f"post_delay_variance must be >= 0, got {post_delay_variance}"
             )
+        if not 0.0 <= bbox_margin < 0.5:
+            raise ValueError(
+                f"bbox_margin must be in [0, 0.5), got {bbox_margin}"
+            )
         self._account_id = account_id
         self._matcher = matcher or TemplateMatcher()
         self._throttle = throttle
         self._jitter_radius = jitter_radius
         self._post_delay_variance = float(post_delay_variance)
+        self._bbox_margin = float(bbox_margin)
         self._log = get_logger(f"input.{account_id}")
 
     # ------------------------------------------------------------------ #
@@ -279,6 +299,31 @@ class InputBackend(abc.ABC):
                 )
             x, y = point
             delay = target.post_delay if post_delay is None else post_delay
+
+            # Constrain jitter to the matched button's bounding box. The
+            # backend's `_jitter` (called inside `click_xy` when
+            # randomize=True) is bbox-agnostic disk sampling — a 12px
+            # config + a 30x20 button can push the click outside the
+            # button's clickable area. We know the template's size here,
+            # so sample uniformly inside the bbox (with a small margin)
+            # and then tell `click_xy` not to jitter again.
+            if randomize and self._jitter_radius is not None and self._jitter_radius > 0:
+                try:
+                    template = self._matcher.repository.get(target.template)
+                    x, y = self._jitter_in_button(
+                        x, y, template.shape[:2], target.click_offset
+                    )
+                    randomize = False
+                except Exception:  # noqa: BLE001
+                    # Template shape unavailable (test stub, race with
+                    # invalidate, ...): fall back to legacy unconstrained
+                    # jitter inside click_xy. Better a slightly-off click
+                    # than a crash.
+                    self._log.debug(
+                        "bbox-constrained jitter unavailable for %s; "
+                        "falling back to legacy _jitter",
+                        target.display_name,
+                    )
         else:
             x, y = target
             delay = 0.0 if post_delay is None else post_delay
@@ -288,8 +333,9 @@ class InputBackend(abc.ABC):
         # + match step above intentionally does NOT consume rate budget —
         # recognition is read-only and shouldn't count against an "actions
         # per minute" cap.
-        self._log.debug("click %s at (%d, %d) delay=%.2f",
-                        getattr(target, "display_name", "(xy)"), x, y, delay)
+        self._log.debug("click %s at (%d, %d) delay=%.2f randomize=%s",
+                        getattr(target, "display_name", "(xy)"),
+                        x, y, delay, randomize)
         self.click_xy(x, y, randomize=randomize)
         if delay > 0:
             # Fuzz the post-delay slightly so back-to-back identical actions
@@ -376,6 +422,11 @@ class InputBackend(abc.ABC):
         defaults to the legacy 3px square jitter. When a radius is in
         effect, sampling is disk-uniform via `core.humanize.jitter_point`
         — gentler corners than the legacy `randint` square.
+
+        This bbox-agnostic version is used for raw `(x, y)` clicks where
+        no button bounding box is known. Button clicks dispatched via
+        `click(Button)` go through `_jitter_in_button` instead, which
+        guarantees the click stays inside the captured button frame.
         """
         effective = radius if radius is not None else self._jitter_radius
         if effective is None:
@@ -387,6 +438,88 @@ class InputBackend(abc.ABC):
         if effective <= 0:
             return x, y
         return _humanize.jitter_point(x, y, effective)
+
+    def _jitter_in_button(
+        self,
+        cx: int,
+        cy: int,
+        template_shape: Tuple[int, int],
+        click_offset: Tuple[int, int] = (0, 0),
+        *,
+        margin: int = 2,
+    ) -> Tuple[int, int]:
+        """Sample a click point uniformly within the matched button's bbox.
+
+        Why this exists separately from `_jitter`:
+            `_jitter` shifts by a configured radius and has no idea how big
+            the button it's clicking is. On a 12px disk-jitter profile,
+            a 30x20 px button gets clicks landing ±12 in y — outside the
+            button — and the game ignores them. This method takes the
+            template's actual size and samples inside the **full bbox**
+            (minus an inset for safety) so the click is *guaranteed* to
+            be on the button as long as the template was captured tight,
+            and uses the bbox's natural spread for humanization rather
+            than a tiny disk near the center.
+
+        Design (post-2026-05 redesign):
+            `self._jitter_radius` is **only an on/off switch + a fallback
+            for raw (x, y) clicks**. It is NOT a cap on bbox sampling.
+            A 200x200 button with `jitter_radius=12` and `bbox_margin=0.1`
+            samples ±80 px in each axis — the full bbox area minus 10%
+            per side — not ±12. To get tighter clicks on huge buttons,
+            raise ``humanize.bbox_margin`` (e.g. 0.3 = sample inner 40%).
+
+        Inset = max(fractional, pixel-floor):
+            * Fractional: ``round(w * self._bbox_margin)`` per side.
+            * Pixel floor: ``margin`` (default 2 px) per side — protects
+              tiny templates against anti-aliased / sub-pixel edge art
+              that the fractional margin rounds to 0.
+            * The half-extent on each axis is ``max(0, half_size - inset)``.
+
+        Behavior summary:
+            * jitter disabled (`_jitter_radius` None / 0) -> ``(cx, cy)``
+            * bbox so small that half-extent is 0 after inset -> ``(cx, cy)``
+              (e.g. 4x4 template with default margin: center only — better
+              a center-deterministic click than an edge miss)
+            * otherwise -> uniformly random in the inset rectangle around
+              ``(cx, cy)``. Sampling is rectangular `randint` — natural
+              "anywhere on the button" feel.
+
+        Args:
+            cx, cy: Click center returned by `TemplateMatcher.find` — this
+                already has `click_offset` applied.
+            template_shape: ``(height, width)`` from the matched template
+                (e.g. ``self._matcher.repository.get(name).shape[:2]``).
+            click_offset: `Button.click_offset`. The bbox is centered on
+                `(cx - dx, cy - dy)`; sampling happens within that bbox
+                and then `click_offset` is re-applied via the same `cx, cy`
+                anchor. In practice this means: for a Button with
+                `click_offset != (0,0)`, the click stays within an
+                identically-sized box shifted by the offset — preserving
+                the operator's intent.
+            margin: Pixel-floor inset per side (anti-aliased pixels,
+                sub-pixel border art, etc.). Default 2. Combined with
+                ``self._bbox_margin`` via max() — whichever is larger wins.
+
+        Returns:
+            Integer ``(x, y)`` guaranteed to lie within the inset bbox.
+        """
+        if self._jitter_radius is None or self._jitter_radius <= 0:
+            return cx, cy
+
+        h, w = template_shape
+        # Effective inset per side: at least `margin` px, scaled up by
+        # `bbox_margin` for bigger templates.
+        inset_w = max(margin, int(round(w * self._bbox_margin)))
+        inset_h = max(margin, int(round(h * self._bbox_margin)))
+        half_w = max(0, w // 2 - inset_w)
+        half_h = max(0, h // 2 - inset_h)
+        if half_w <= 0 and half_h <= 0:
+            return cx, cy
+
+        jx = random.randint(-half_w, half_w) if half_w > 0 else 0
+        jy = random.randint(-half_h, half_h) if half_h > 0 else 0
+        return cx + jx, cy + jy
 
     # ------------------------------------------------------------------ #
     # Context manager sugar

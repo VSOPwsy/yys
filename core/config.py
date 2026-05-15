@@ -56,6 +56,12 @@ class HumanizeConfig:
     """Humanize / throttle parameters shared by all accounts."""
 
     click_jitter_radius: int = 12
+    # Fraction of each side of a matched button's bbox to inset before
+    # uniformly sampling the click. ``0.1`` = sample the inner 80% along
+    # each axis (5% off each edge). ``0.0`` = sample anywhere in the bbox.
+    # Must be in ``[0, 0.5)``. The actual inset has a 2px hard minimum to
+    # avoid edge-pixel clicks on tiny templates regardless of the fraction.
+    bbox_margin: float = 0.1
     delay_variance: float = 0.5
     min_action_interval_ms: int = 400
     max_actions_per_minute: int = 60
@@ -220,6 +226,11 @@ def _parse_humanize(
     cfg = HumanizeConfig(**{k: raw[k] for k in raw if k in fields})
     _require_nonnegative(cfg.click_jitter_radius,
                          "humanize.click_jitter_radius", path)
+    if not (0.0 <= cfg.bbox_margin < 0.5):
+        raise ConfigError(
+            f"config {path}: humanize.bbox_margin must be in [0, 0.5), "
+            f"got {cfg.bbox_margin}"
+        )
     _require_nonnegative(cfg.delay_variance, "humanize.delay_variance", path)
     _require_nonnegative(cfg.min_action_interval_ms,
                          "humanize.min_action_interval_ms", path)

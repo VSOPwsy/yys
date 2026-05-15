@@ -11,6 +11,7 @@ from core.humanize import (
     human_sleep,
     jitter_point,
     random_delay,
+    random_point_in_rect,
     weighted_random_path,
 )
 
@@ -39,6 +40,44 @@ def test_jitter_point_uses_injected_rng_for_determinism():
     a = [jitter_point(0, 0, radius=20, rng=rng1) for _ in range(5)]
     b = [jitter_point(0, 0, radius=20, rng=rng2) for _ in range(5)]
     assert a == b
+
+
+# --------------------------------------------------------------------------- #
+# random_point_in_rect
+# --------------------------------------------------------------------------- #
+def test_random_point_in_rect_stays_inside_rect():
+    rng = random.Random(42)
+    region = (100, 200, 300, 400)
+    for _ in range(500):
+        x, y = random_point_in_rect(region, rng=rng)
+        assert 100 <= x <= 300
+        assert 200 <= y <= 400
+
+
+def test_random_point_in_rect_collapsed_to_point():
+    # Zero-area rect collapses to a deterministic single point.
+    assert random_point_in_rect((50, 60, 50, 60)) == (50, 60)
+
+
+def test_random_point_in_rect_uses_injected_rng_for_determinism():
+    rng1 = random.Random(13)
+    rng2 = random.Random(13)
+    region = (0, 0, 100, 100)
+    a = [random_point_in_rect(region, rng=rng1) for _ in range(5)]
+    b = [random_point_in_rect(region, rng=rng2) for _ in range(5)]
+    assert a == b
+
+
+def test_random_point_in_rect_rejects_inverted_corners():
+    with pytest.raises(ValueError, match="inverted"):
+        random_point_in_rect((300, 0, 100, 100))  # x1 > x2
+    with pytest.raises(ValueError, match="inverted"):
+        random_point_in_rect((0, 300, 100, 100))  # y1 > y2
+
+
+def test_random_point_in_rect_rejects_bad_shape():
+    with pytest.raises(ValueError, match="x1, y1, x2, y2"):
+        random_point_in_rect((0, 0, 100))  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #

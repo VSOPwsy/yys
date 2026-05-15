@@ -61,6 +61,7 @@ class FakeBackend(InputBackend):
         throttle=None,  # Optional[core.scheduler.throttle.Throttle]
         jitter_radius: int | None = None,
         post_delay_variance: float = 0.0,
+        bbox_margin: float = 0.1,
     ) -> None:
         super().__init__(
             account_id=account_id,
@@ -68,6 +69,7 @@ class FakeBackend(InputBackend):
             throttle=throttle,
             jitter_radius=jitter_radius,
             post_delay_variance=post_delay_variance,
+            bbox_margin=bbox_margin,
         )
         self.current_screen = initial_screen
         self._connected = False

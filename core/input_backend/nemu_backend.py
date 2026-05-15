@@ -44,6 +44,7 @@ class NemuIpcBackend(InputBackend):
         throttle: "Optional[Throttle]" = None,
         jitter_radius: Optional[int] = None,
         post_delay_variance: float = 0.0,
+        bbox_margin: float = 0.1,
     ) -> None:
         """Construct an unconnected backend bound to a MuMu instance.
 
@@ -69,6 +70,7 @@ class NemuIpcBackend(InputBackend):
             throttle=throttle,
             jitter_radius=jitter_radius,
             post_delay_variance=post_delay_variance,
+            bbox_margin=bbox_margin,
         )
 
         if "MuMuPlayerGlobal" in mumu_folder:
@@ -107,6 +109,26 @@ class NemuIpcBackend(InputBackend):
         self._mumu_folder = mumu_folder
         self._instance_id = instance_id
         self._display_id = display_id
+
+        # MuMu DLL coordinate-rotation bypass.
+        #
+        # `vendor/alas` ships a `NemuIpcImpl.convert_xy(x, y) = (height - y, x)`
+        # — a 90° rotation from ADB-landscape into the DLL's portrait internal
+        # coord. This is correct for *classic* MuMu 12 DLLs (the one at
+        # `<root>/shell/sdk/external_renderer_ipc.dll`). The v5.0+ DLL at
+        # `<root>/nx_device/12.0/shell/sdk/external_renderer_ipc.dll` accepts
+        # ADB landscape coords directly; for that variant the rotation
+        # actively breaks input — clicks land in the wrong quadrant.
+        #
+        # Detection mirrors Alas's loader (classic preferred when both exist),
+        # so if classic is absent we know Alas loaded v5 and we must bypass
+        # `convert_xy`. See CLAUDE.md §7 "MuMu DLL coord rotation".
+        if self._needs_rotation_bypass(mumu_folder):
+            self._ipc.convert_xy = lambda x, y: (int(x), int(y))
+            self._log.info(
+                "MuMu v5.0+ DLL detected; bypassing legacy convert_xy rotation "
+                "(touches will use ADB landscape coords directly)"
+            )
         # Serialize DLL access. The Alas wrapper already runs each DLL call
         # on a worker thread for timeout safety, but concurrent down/up from
         # multiple threads inside our process would still race the touch
@@ -243,6 +265,27 @@ class NemuIpcBackend(InputBackend):
         bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
         cv2.flip(bgr, 0, dst=bgr)
         return bgr
+
+    @staticmethod
+    def _needs_rotation_bypass(nemu_folder: str) -> bool:
+        """True iff Alas will load the v5.0+ DLL, which doesn't need a
+        90° rotation of input coords.
+
+        Alas's `NemuIpcImpl.__init__` tries the classic path first and falls
+        back to v5. We mirror that order: if the classic DLL exists, Alas
+        will use it, and the legacy `convert_xy` rotation is correct; if only
+        v5 is present, Alas loads v5 and `convert_xy` becomes wrong (clicks
+        land in the wrong quadrant — diagnosed empirically by tapping a
+        known ADB coord and watching MuMu's "Show touches" overlay).
+        """
+        classic = os.path.join(
+            nemu_folder, "shell", "sdk", "external_renderer_ipc.dll"
+        )
+        v5 = os.path.join(
+            nemu_folder, "nx_device", "12.0", "shell", "sdk",
+            "external_renderer_ipc.dll",
+        )
+        return (not os.path.exists(classic)) and os.path.exists(v5)
 
     def _stroke(
         self,

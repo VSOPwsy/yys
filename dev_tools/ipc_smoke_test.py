@@ -71,6 +71,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the down/up step (useful if you don't want to touch the UI).",
     )
+    p.add_argument(
+        "--bypass-rotation",
+        action="store_true",
+        help="Replace Alas's NemuIpcImpl.convert_xy with identity (no 90° "
+             "rotation). Use this to verify whether your MuMu DLL needs the "
+             "legacy ADB->portrait rotation. With this flag, the tap goes to "
+             "the raw ADB (x,y); without it, Alas rotates first. Compare "
+             "where MuMu's 'Show touches' draws the circle to decide which "
+             "is correct for your install. See CLAUDE.md §7 'DLL 坐标系'.",
+    )
     return p.parse_args()
 
 
@@ -120,6 +130,13 @@ def main() -> int:
             instance_id=args.instance,
             display_id=args.display,
         )
+
+    if args.bypass_rotation:
+        # Same patch NemuIpcBackend applies when it detects the v5.0+ DLL.
+        # Doing it here too lets us isolate the rotation question at the
+        # vendor layer (no backend / matcher / Button involved).
+        ipc.convert_xy = lambda x, y: (int(x), int(y))
+        print("   [bypass-rotation] convert_xy replaced with identity")
 
     with timer.step("connect"):
         ipc.connect()

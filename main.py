@@ -114,6 +114,7 @@ def _build_backend(
             throttle=throttle,
             jitter_radius=g.humanize.click_jitter_radius,
             post_delay_variance=g.humanize.post_delay_variance,
+            bbox_margin=g.humanize.bbox_margin,
         )
     # Real nemu backend. `get_input_backend` raises BackendNotAvailable
     # for misconfigured paths; we let it propagate so main.py exits early.
@@ -126,6 +127,7 @@ def _build_backend(
         throttle=throttle,
         jitter_radius=g.humanize.click_jitter_radius,
         post_delay_variance=g.humanize.post_delay_variance,
+        bbox_margin=g.humanize.bbox_margin,
     )
 
 

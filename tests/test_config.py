@@ -58,6 +58,7 @@ def test_defaults_filled_in_when_global_missing(tmp_path):
     # The whole `global:` section was elided — should fall back to defaults.
     assert cfg.global_.scheduler.daily_max_runtime_minutes == 480
     assert cfg.global_.humanize.click_jitter_radius == 12
+    assert cfg.global_.humanize.bbox_margin == 0.1
     assert cfg.global_.hotkeys.pause == "f9"
 
 
@@ -139,6 +140,41 @@ def test_negative_runtime_cap_raises(tmp_path):
     """)
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_bbox_margin_out_of_range_raises(tmp_path):
+    # bbox_margin must be in [0, 0.5); 0.5+ would inset away the whole bbox.
+    path = _write(tmp_path, """
+        global:
+          humanize:
+            bbox_margin: 0.5
+        accounts: []
+    """)
+    with pytest.raises(ConfigError, match="bbox_margin"):
+        load_config(path)
+
+
+def test_bbox_margin_negative_raises(tmp_path):
+    path = _write(tmp_path, """
+        global:
+          humanize:
+            bbox_margin: -0.1
+        accounts: []
+    """)
+    with pytest.raises(ConfigError, match="bbox_margin"):
+        load_config(path)
+
+
+def test_bbox_margin_zero_is_valid(tmp_path):
+    # 0.0 is allowed — means "sample anywhere in bbox, no inset".
+    path = _write(tmp_path, """
+        global:
+          humanize:
+            bbox_margin: 0.0
+        accounts: []
+    """)
+    cfg = load_config(path)
+    assert cfg.global_.humanize.bbox_margin == 0.0
 
 
 def test_unknown_plugin_key_raises(tmp_path):

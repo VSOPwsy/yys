@@ -32,8 +32,18 @@ global:
     graceful_stop_timeout_seconds: 10.0
 
   humanize:
-    # Disk-uniform pixel jitter applied to every tap. Conservative profile.
+    # Master jitter enable + raw (x, y) click radius. 0 / null disables
+    # humanization entirely (Button clicks land on exact match center).
+    # Positive value: raw click_xy gets disk-jitter of this radius; Button
+    # clicks DO NOT use this number as a cap — they sample the full
+    # matched bbox tuned by `bbox_margin` below.
     click_jitter_radius: 12
+    # Fractional inset per side when sampling inside a Button's bbox.
+    # 0.0 = sample anywhere in bbox (incl. edge pixels)
+    # 0.1 = sample inner 80% (5% off each edge; sensible default)
+    # 0.3 = sample inner 40% (tight clicks on huge banners/panels)
+    # Must be in [0, 0.5). Floor of 2 px is always enforced regardless.
+    bbox_margin: 0.1
     # Click post-delay is fuzzed by ±this fraction (uniform).
     post_delay_variance: 0.3
     # Generic delay fuzz factor — used inside core.humanize.random_delay.

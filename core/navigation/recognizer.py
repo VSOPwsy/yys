@@ -7,7 +7,11 @@ The graph stores recognizers as opaque values (the rule lives in
 
 * `Button`   -> `backend.is_visible(button)` (well, equivalent via matcher).
 * `str`      -> `Button.simple(name)` and then the Button rule.
-* callable   -> called directly.
+* callable   -> called directly. Two signatures are accepted:
+  ``(screenshot) -> bool`` and ``(screenshot, matcher) -> bool``. The
+  two-argument form lets composite recognizers run multiple
+  ``matcher.find(...)`` checks without having to closure-capture a matcher
+  at graph-build time (when the per-account matcher isn't available yet).
 * anything else -> `TypeError`.
 
 We don't memoize the resolved callable on the Vertex because Vertex is a
@@ -21,6 +25,7 @@ developer notices.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -129,11 +134,33 @@ class ScreenRecognizer:
         if isinstance(raw, str):
             return self._button_recognizer(Button.simple(raw))
         if callable(raw):
-            return raw
+            return self._wrap_callable(raw)
         raise TypeError(
             f"recognizer must be a Button, str template name, or callable, "
             f"got {type(raw).__name__}"
         )
+
+    def _wrap_callable(self, fn: Callable[..., Any]) -> NormalizedRecognizer:
+        # Composite recognizers (`AND NOT`, etc.) often need to run several
+        # `matcher.find(...)` calls — passing the matcher in here means the
+        # plugin author doesn't have to capture one at graph-build time,
+        # where the per-account matcher isn't available yet.
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            # C-implemented callables without an inspectable signature: fall
+            # back to the single-arg convention.
+            return lambda shot: bool(fn(shot))
+        required = sum(
+            1
+            for p in sig.parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            and p.default is p.empty
+        )
+        if required >= 2:
+            matcher = self._matcher
+            return lambda shot: bool(fn(shot, matcher))
+        return lambda shot: bool(fn(shot))
 
     def _button_recognizer(self, button: Button) -> NormalizedRecognizer:
         matcher = self._matcher

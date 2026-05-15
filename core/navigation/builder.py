@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple, Union
 
 from core.exceptions import GraphValidationError
+from core.humanize import random_point_in_rect
 from core.logging_config import get_logger
 from core.navigation.graph import Action, GameGraph, Recognizer
 from core.vision.button import Button
@@ -287,6 +288,87 @@ def click_button(button: Button) -> Action:
         ctx.backend.click(button)
 
     _action.__name__ = f"click_button({button.display_name})"
+    return _action
+
+
+def click_button_with_expand(
+    button: Button,
+    expand_region: Tuple[int, int, int, int],
+    *,
+    wait_after_expand: float = 1.0,
+    randomize: bool = True,
+) -> Action:
+    """Click ``button``. If it's not visible, tap inside ``expand_region``
+    first, wait, then click.
+
+    Motivation:
+        PathFinder builds a sequence of edges and `Navigator` walks them
+        in order. Some target buttons live inside a collapsible UI panel —
+        they're hidden until the panel is expanded by tapping a hot zone
+        with no template-able visual. Modeling each (collapsed, expanded)
+        cross-product as a separate vertex blows up to ``2^N`` for ``N``
+        independent folds, so instead we attach the fold-handling at the
+        *edge* — let the action verify visibility, expand on demand, then
+        click. PathFinder stays oblivious; plugin step code stays
+        oblivious; the knowledge lives at exactly one place: the edge
+        that needs to click a folded button.
+
+    Behavior:
+        1. ``backend.find(button)`` — if it returns a hit, just
+           ``backend.click(button)`` and we're done.
+        2. Otherwise: ``random_point_in_rect(expand_region)`` picks a
+           uniformly random point inside the hotspot rect, then
+           ``backend.click_xy(x, y, randomize=randomize)`` taps it.
+           Backend ``_jitter`` (typically ±3 px) stacks on top for micro
+           noise.
+        3. ``time.sleep(wait_after_expand)`` — wait for the fold-out
+           animation to settle.
+        4. ``backend.click(button)`` — this calls ``find`` internally; if
+           the button still isn't visible (wrong hotspot, animation too
+           slow, button just isn't in this fold), `MatchTimeout`
+           propagates → `Navigator` translates to `EdgeExecutionFailed`
+           and replans.
+
+    Args:
+        button: The target button to click after expansion.
+        expand_region: ``(x1, y1, x2, y2)`` ADB rect to tap-inside when
+            ``button`` is hidden. See `random_point_in_rect` for
+            validation.
+        wait_after_expand: Seconds to sleep after the expand tap. Default
+            1.0; tune up if the fold-out animation is slow.
+        randomize: Forwarded to the backend's ``click_xy`` for the expand
+            tap (the final ``click(button)`` always randomizes via the
+            base ``_jitter_in_button`` path).
+
+    Raises:
+        ValueError: `wait_after_expand < 0`, or `expand_region` malformed
+            (propagated from `random_point_in_rect`).
+        MatchTimeout: Button still invisible after expand + wait
+            (propagates from `backend.click`).
+
+    Returns:
+        An action suitable for `Edge.action`.
+    """
+    if wait_after_expand < 0:
+        raise ValueError(
+            f"wait_after_expand must be >= 0, got {wait_after_expand}"
+        )
+
+    def _action(ctx: NavigationContext) -> None:
+        if ctx.backend.find(button) is None:
+            log.info(
+                "click_button_with_expand: %s not visible; tapping expand "
+                "region %s and waiting %.2fs",
+                button.display_name,
+                expand_region,
+                wait_after_expand,
+            )
+            x, y = random_point_in_rect(expand_region)
+            ctx.backend.click_xy(x, y, randomize=randomize)
+            time.sleep(wait_after_expand)
+        ctx.backend.click(button)
+
+    _action.__name__ = f"click_button_with_expand({button.display_name})"
     return _action
 
 
